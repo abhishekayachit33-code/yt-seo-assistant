@@ -1,3 +1,4 @@
+import html
 import os
 
 import streamlit as st
@@ -31,8 +32,42 @@ st.markdown(
         color: #FFFFFF;
     }
     div[data-testid="stTabs"] button[aria-selected="true"] {
+        color: #1A73E8 !important;
+    }
+    div[data-testid="stTabs"] [data-baseweb="tab-highlight"] {
+        background-color: #1A73E8 !important;
+    }
+    /* Long comma-joined lists must wrap, or only the first few items are visible. */
+    div[data-testid="stCode"] pre, div[data-testid="stCode"] code {
+        white-space: pre-wrap !important;
+        word-break: break-word !important;
+    }
+    .tag-chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin: 4px 0 16px 0;
+    }
+    .tag-chips span {
+        background-color: #EAF1FB;
+        color: #14418B;
+        border: 1px solid #C7DAF7;
+        border-radius: 12px;
+        padding: 2px 10px;
+        font-size: 0.82rem;
+        line-height: 1.6;
+    }
+    .chapter-row {
+        display: flex;
+        gap: 12px;
+        padding: 5px 0;
+        border-bottom: 1px solid #EEF1F5;
+    }
+    .chapter-row .ts {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
         color: #1A73E8;
-        border-bottom-color: #1A73E8;
+        font-weight: 600;
+        min-width: 56px;
     }
     </style>
     """,
@@ -96,17 +131,34 @@ if run:
 
     with tags_tab:
         tags = result.get("tags", [])
-        st.write(f"{len(tags)} tags generated")
-        st.code(", ".join(tags), language=None)
+        joined = ", ".join(tags)
+        st.caption(f"{len(tags)} tags · {len(joined)}/500 characters")
+        if len(joined) > 500:
+            st.warning("Over YouTube's 500-character tag limit. Trim before pasting.")
+
+        chips = "".join(f"<span>{html.escape(t)}</span>" for t in tags)
+        st.markdown(f'<div class="tag-chips">{chips}</div>', unsafe_allow_html=True)
+
+        st.caption("Copy for the tags field")
+        st.code(joined, language=None)
 
     with chapters_tab:
         chapters = result.get("chapters", [])
         if chapters:
-            for chapter in chapters:
-                st.write(f"{chapter.get('timestamp', '')} — {chapter.get('title', '')}")
+            rows = "".join(
+                f'<div class="chapter-row"><span class="ts">{html.escape(str(c.get("timestamp", "")))}</span>'
+                f'<span>{html.escape(str(c.get("title", "")))}</span></div>'
+                for c in chapters
+            )
+            st.markdown(rows, unsafe_allow_html=True)
+            st.caption("Copy into your video description")
+            st.code(
+                "\n".join(f"{c.get('timestamp', '')} {c.get('title', '')}" for c in chapters),
+                language=None,
+            )
         else:
             st.info("No chapters generated (transcript was not available).")
 
     with suggestions_tab:
-        for suggestion in result.get("suggestions", []):
-            st.write(f"- {suggestion}")
+        for i, suggestion in enumerate(result.get("suggestions", []), 1):
+            st.markdown(f"**{i}.** {suggestion}")

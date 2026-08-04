@@ -3,5 +3,5 @@
 .git/
 __pycache__/
 *.pyc
-.streamlit/
 .claude/
+.agents/
