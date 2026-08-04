@@ -4,6 +4,7 @@ import os
 import streamlit as st
 from dotenv import load_dotenv
 
+from comments import fetch_top_comments, summarize_comments
 from limits import check_limits
 from llm import generate_seo
 from transcript import fetch_transcript_text
@@ -149,6 +150,10 @@ if run:
     if not transcript:
         st.info("No transcript available for this video. Tags, chapters, and hook analysis will be limited.")
 
+    with st.spinner("Fetching comments..."):
+        top_comments = fetch_top_comments(video_id, YOUTUBE_API_KEY)
+        comment_summary = summarize_comments(GEMINI_API_KEY, top_comments) if top_comments else None
+
     with st.spinner("Generating SEO suggestions..."):
         try:
             result = generate_seo(
@@ -184,8 +189,11 @@ if run:
 
     (
         tags_tab, titles_tab, description_tab, hashtags_tab,
-        chapters_tab, hook_tab, suggestions_tab,
-    ) = st.tabs(["Tags", "Titles", "Description", "Hashtags", "Chapters", "Hook", "Suggestions"])
+        chapters_tab, hook_tab, comments_tab, suggestions_tab,
+    ) = st.tabs([
+        "Tags", "Titles", "Description", "Hashtags",
+        "Chapters", "Hook", "Comments", "Suggestions",
+    ])
 
     with tags_tab:
         joined = ", ".join(tags)
@@ -249,6 +257,29 @@ if run:
                 st.info(hook["rewrite"])
         else:
             st.info("Hook analysis needs a transcript, which was not available for this video.")
+
+    with comments_tab:
+        if not top_comments:
+            st.info("No comments available for this video (comments may be disabled).")
+        else:
+            st.caption(f"Based on the top {len(top_comments)} comments by relevance")
+            if comment_summary and comment_summary.get("summary"):
+                st.write(comment_summary["summary"])
+            positive = (comment_summary or {}).get("positive_themes", [])
+            negative = (comment_summary or {}).get("negative_themes", [])
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("**Viewers liked**")
+                for theme in positive:
+                    st.markdown(f"- {theme}")
+                if not positive:
+                    st.caption("Nothing notable")
+            with col2:
+                st.markdown("**Viewers complained about**")
+                for theme in negative:
+                    st.markdown(f"- {theme}")
+                if not negative:
+                    st.caption("Nothing notable")
 
     with suggestions_tab:
         for i, suggestion in enumerate(suggestions, 1):
