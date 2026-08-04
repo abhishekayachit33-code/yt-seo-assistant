@@ -4,6 +4,7 @@ import os
 import streamlit as st
 from dotenv import load_dotenv
 
+from limits import check_limits
 from llm import generate_seo
 from transcript import fetch_transcript_text
 from youtube import InvalidURLError, VideoNotFoundError, fetch_metadata, parse_video_id
@@ -57,6 +58,16 @@ st.markdown(
         font-size: 0.82rem;
         line-height: 1.6;
     }
+    .tag-chips span.existing {
+        background-color: #F3F4F6;
+        color: #4B5563;
+        border-color: #E5E7EB;
+    }
+    .tag-chips span.existing::after {
+        content: " · kept";
+        font-size: 0.72rem;
+        color: #9CA3AF;
+    }
     .chapter-row {
         display: flex;
         gap: 12px;
@@ -69,13 +80,37 @@ st.markdown(
         font-weight: 600;
         min-width: 56px;
     }
+    .limit-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 8px;
+        margin: 8px 0 20px 0;
+    }
+    .limit-card {
+        border: 1px solid #E5E7EB;
+        border-radius: 8px;
+        padding: 8px 12px;
+    }
+    .limit-card .label {
+        font-size: 0.78rem;
+        color: #6B7280;
+    }
+    .limit-card .value {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.95rem;
+        font-weight: 600;
+    }
+    .limit-card.ok { border-left: 3px solid #1A9E5C; }
+    .limit-card.ok .value { color: #1A9E5C; }
+    .limit-card.fail { border-left: 3px solid #C0362C; }
+    .limit-card.fail .value { color: #C0362C; }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 st.title("YouTube SEO Assistant")
-st.caption("Paste a video URL to generate SEO tags, chapter timestamps, and reach suggestions. Deployed via automated pipeline which id odne by ABhishek.")
+st.caption("Paste a video URL to generate SEO tags, titles, descriptions, chapters, and reach suggestions.")
 
 url = st.text_input("YouTube video URL", placeholder="https://www.youtube.com/watch?v=...")
 run = st.button("Analyze")
@@ -112,7 +147,7 @@ if run:
         transcript = fetch_transcript_text(video_id)
 
     if not transcript:
-        st.info("No transcript available for this video. Tags and suggestions will be based on title, description, and existing tags only.")
+        st.info("No transcript available for this video. Tags, chapters, and hook analysis will be limited.")
 
     with st.spinner("Generating SEO suggestions..."):
         try:
@@ -127,23 +162,67 @@ if run:
             st.error(f"LLM request failed: {exc}")
             st.stop()
 
-    tags_tab, chapters_tab, suggestions_tab = st.tabs(["Tags", "Chapters", "Suggestions"])
+    tags = result.get("tags", [])
+    titles = result.get("titles", [])
+    description = result.get("description", "")
+    hashtags = result.get("hashtags", [])
+    chapters = result.get("chapters", [])
+    suggestions = result.get("suggestions", [])
+    hook = result.get("hook_analysis", {})
+
+    limit_checks = check_limits(meta.title, description, tags, hashtags)
+    cards = "".join(
+        f'<div class="limit-card {"ok" if c.ok else "fail"}">'
+        f'<div class="label">{html.escape(c.label)}</div>'
+        f'<div class="value">{c.current}/{c.maximum}</div>'
+        f"</div>"
+        for c in limit_checks
+    )
+    st.markdown(f'<div class="limit-grid">{cards}</div>', unsafe_allow_html=True)
+    if any(not c.ok for c in limit_checks):
+        st.warning("One or more fields exceed YouTube's limits — trim before publishing.")
+
+    (
+        tags_tab, titles_tab, description_tab, hashtags_tab,
+        chapters_tab, hook_tab, suggestions_tab,
+    ) = st.tabs(["Tags", "Titles", "Description", "Hashtags", "Chapters", "Hook", "Suggestions"])
 
     with tags_tab:
-        tags = result.get("tags", [])
         joined = ", ".join(tags)
         st.caption(f"{len(tags)} tags · {len(joined)}/500 characters")
-        if len(joined) > 500:
-            st.warning("Over YouTube's 500-character tag limit. Trim before pasting.")
 
-        chips = "".join(f"<span>{html.escape(t)}</span>" for t in tags)
+        existing_lower = {t.lower() for t in meta.tags}
+        chips = "".join(
+            f'<span class="{"existing" if t.lower() in existing_lower else ""}">{html.escape(t)}</span>'
+            for t in tags
+        )
         st.markdown(f'<div class="tag-chips">{chips}</div>', unsafe_allow_html=True)
+        if meta.tags:
+            st.caption(f"{len(existing_lower & {t.lower() for t in tags})} of your existing {len(meta.tags)} tags were kept; the rest are new suggestions.")
 
         st.caption("Copy for the tags field")
         st.code(joined, language=None)
 
+    with titles_tab:
+        if titles:
+            for i, t in enumerate(titles, 1):
+                st.markdown(f"**{i}.** {t}  \n<span style='color:#9CA3AF;font-size:0.78rem'>{len(t)}/100 characters</span>", unsafe_allow_html=True)
+        else:
+            st.info("No title suggestions generated.")
+
+    with description_tab:
+        if description:
+            st.text_area("Optimized description", description, height=280, label_visibility="collapsed")
+        else:
+            st.info("No description generated.")
+
+    with hashtags_tab:
+        st.caption(f"{len(hashtags)}/15 hashtags")
+        chips = "".join(f"<span>{html.escape(h)}</span>" for h in hashtags)
+        st.markdown(f'<div class="tag-chips">{chips}</div>', unsafe_allow_html=True)
+        st.code(" ".join(hashtags), language=None)
+
     with chapters_tab:
-        chapters = result.get("chapters", [])
         if chapters:
             rows = "".join(
                 f'<div class="chapter-row"><span class="ts">{html.escape(str(c.get("timestamp", "")))}</span>'
@@ -159,6 +238,18 @@ if run:
         else:
             st.info("No chapters generated (transcript was not available).")
 
+    with hook_tab:
+        verdict = hook.get("verdict", "")
+        if verdict and verdict != "unavailable":
+            st.markdown(f"**Verdict:** {verdict}")
+            if hook.get("reasoning"):
+                st.write(hook["reasoning"])
+            if hook.get("rewrite"):
+                st.caption("Suggested rewrite for the opening")
+                st.info(hook["rewrite"])
+        else:
+            st.info("Hook analysis needs a transcript, which was not available for this video.")
+
     with suggestions_tab:
-        for i, suggestion in enumerate(result.get("suggestions", []), 1):
+        for i, suggestion in enumerate(suggestions, 1):
             st.markdown(f"**{i}.** {suggestion}")
