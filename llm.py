@@ -5,7 +5,7 @@ from google.genai import types
 
 from gemini_client import generate_content_with_fallback
 
-MODEL = "gemini-2.5-flash"
+MODEL = "gemini-flash-latest"
 
 SYSTEM_PROMPT = (
     "You are an SEO assistant for YouTube creators. Given a video's title, "
