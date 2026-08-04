@@ -10,7 +10,7 @@ from youtube import InvalidURLError, VideoNotFoundError, fetch_metadata, parse_v
 load_dotenv()
 
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 st.set_page_config(page_title="YouTube SEO Assistant", layout="centered")
 
@@ -46,8 +46,8 @@ url = st.text_input("YouTube video URL", placeholder="https://www.youtube.com/wa
 run = st.button("Analyze")
 
 if run:
-    if not YOUTUBE_API_KEY or not GROQ_API_KEY:
-        st.error("Missing YOUTUBE_API_KEY or GROQ_API_KEY. Add them to your .env file.")
+    if not YOUTUBE_API_KEY or not GEMINI_API_KEY:
+        st.error("Missing YOUTUBE_API_KEY or GEMINI_API_KEY. Add them to your .env file.")
         st.stop()
 
     if not url:
@@ -82,7 +82,7 @@ if run:
     with st.spinner("Generating SEO suggestions..."):
         try:
             result = generate_seo(
-                api_key=GROQ_API_KEY,
+                api_key=GEMINI_API_KEY,
                 title=meta.title,
                 description=meta.description,
                 existing_tags=meta.tags,
