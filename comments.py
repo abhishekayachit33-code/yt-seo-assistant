@@ -57,25 +57,31 @@ def fetch_top_comments(video_id: str, api_key: str, max_results: int = 50) -> li
 
 def summarize_comments(api_key: str, comments: list[str]) -> dict:
     """One Gemini call over already-fetched comment text. Returns empty
-    themes with no summary if there's nothing to summarize."""
+    themes with no summary if there's nothing to summarize, or if the call
+    itself fails (rate limit, quota, network) -- comment sentiment is a
+    nice-to-have layered on core analysis and must never crash the page."""
+    empty = {"positive_themes": [], "negative_themes": [], "summary": ""}
     if not comments:
-        return {"positive_themes": [], "negative_themes": [], "summary": ""}
+        return empty
 
-    client = genai.Client(api_key=api_key)
-    numbered = "\n".join(f"{i + 1}. {c}" for i, c in enumerate(comments))
+    try:
+        client = genai.Client(api_key=api_key)
+        numbered = "\n".join(f"{i + 1}. {c}" for i, c in enumerate(comments))
 
-    response = client.models.generate_content(
-        model=MODEL,
-        contents=f"Comments:\n{numbered}",
-        config=types.GenerateContentConfig(
-            system_instruction=_SUMMARY_SYSTEM_PROMPT,
-            response_mime_type="application/json",
-            response_schema=_SUMMARY_SCHEMA,
-            temperature=0.4,
-        ),
-    )
+        response = client.models.generate_content(
+            model=MODEL,
+            contents=f"Comments:\n{numbered}",
+            config=types.GenerateContentConfig(
+                system_instruction=_SUMMARY_SYSTEM_PROMPT,
+                response_mime_type="application/json",
+                response_schema=_SUMMARY_SCHEMA,
+                temperature=0.4,
+            ),
+        )
+        data = json.loads(response.text)
+    except Exception:
+        return empty
 
-    data = json.loads(response.text)
     data.setdefault("positive_themes", [])
     data.setdefault("negative_themes", [])
     data.setdefault("summary", "")
