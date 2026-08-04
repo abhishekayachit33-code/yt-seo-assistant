@@ -10,6 +10,10 @@ def _quota_error():
     return errors.APIError(429, {"error": {"message": "quota exceeded", "status": "RESOURCE_EXHAUSTED"}}, None)
 
 
+def _overloaded_error():
+    return errors.APIError(503, {"error": {"message": "high demand", "status": "UNAVAILABLE"}}, None)
+
+
 def _other_error():
     return errors.APIError(400, {"error": {"message": "bad request", "status": "INVALID_ARGUMENT"}}, None)
 
@@ -28,6 +32,23 @@ def test_falls_back_to_second_key_on_quota_error(mock_client_cls):
     assert result is sentinel_response
     assert mock_client_cls.call_args_list[0].kwargs == {"api_key": "key1"}
     assert mock_client_cls.call_args_list[1].kwargs == {"api_key": "key2"}
+
+
+@patch("gemini_client.genai.Client")
+def test_falls_back_to_second_key_on_service_unavailable(mock_client_cls):
+    """503 (Google backend overloaded) found live -- a real analysis hit this
+    after both keys' 429/404 paths were already fixed. Worth retrying against
+    a different key/project, unlike a fixed problem with the request itself."""
+    sentinel_response = MagicMock()
+    first_client = MagicMock()
+    first_client.models.generate_content.side_effect = _overloaded_error()
+    second_client = MagicMock()
+    second_client.models.generate_content.return_value = sentinel_response
+    mock_client_cls.side_effect = [first_client, second_client]
+
+    result = generate_content_with_fallback(["key1", "key2"], model="m", contents="hi")
+
+    assert result is sentinel_response
 
 
 @patch("gemini_client.genai.Client")
