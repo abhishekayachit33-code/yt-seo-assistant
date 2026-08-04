@@ -5,6 +5,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from comments import fetch_top_comments, summarize_comments
+from competitors import find_competitors
 from limits import check_limits
 from llm import generate_seo
 from transcript import fetch_transcript_text
@@ -114,6 +115,10 @@ st.title("YouTube SEO Assistant")
 st.caption("Paste a video URL to generate SEO tags, titles, descriptions, chapters, and reach suggestions.")
 
 url = st.text_input("YouTube video URL", placeholder="https://www.youtube.com/watch?v=...")
+include_competitors = st.checkbox(
+    "Include competitor comparison",
+    help="Uses 100x more YouTube API quota than a routine analysis. Off by default.",
+)
 run = st.button("Analyze")
 
 if run:
@@ -154,6 +159,11 @@ if run:
         top_comments = fetch_top_comments(video_id, YOUTUBE_API_KEY)
         comment_summary = summarize_comments(GEMINI_API_KEY, top_comments) if top_comments else None
 
+    competitors = []
+    if include_competitors:
+        with st.spinner("Finding competing videos..."):
+            competitors = find_competitors(meta.title, YOUTUBE_API_KEY, exclude_video_id=video_id)
+
     with st.spinner("Generating SEO suggestions..."):
         try:
             result = generate_seo(
@@ -189,10 +199,10 @@ if run:
 
     (
         tags_tab, titles_tab, description_tab, hashtags_tab,
-        chapters_tab, hook_tab, comments_tab, suggestions_tab,
+        chapters_tab, hook_tab, comments_tab, competitors_tab, suggestions_tab,
     ) = st.tabs([
         "Tags", "Titles", "Description", "Hashtags",
-        "Chapters", "Hook", "Comments", "Suggestions",
+        "Chapters", "Hook", "Comments", "Competitors", "Suggestions",
     ])
 
     with tags_tab:
@@ -280,6 +290,22 @@ if run:
                     st.markdown(f"- {theme}")
                 if not negative:
                     st.caption("Nothing notable")
+
+    with competitors_tab:
+        if not include_competitors:
+            st.info("Enable \"Include competitor comparison\" above and re-run to see this.")
+        elif not competitors:
+            st.info("No competing videos found.")
+        else:
+            for c in competitors:
+                st.markdown(f"**{html.escape(c.title)}**")
+                st.caption(c.channel_title)
+                if c.tags:
+                    chips = "".join(f"<span>{html.escape(t)}</span>" for t in c.tags[:15])
+                    st.markdown(f'<div class="tag-chips">{chips}</div>', unsafe_allow_html=True)
+                else:
+                    st.caption("No public tags")
+                st.divider()
 
     with suggestions_tab:
         for i, suggestion in enumerate(suggestions, 1):
