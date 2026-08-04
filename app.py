@@ -8,6 +8,7 @@ from comments import fetch_top_comments, summarize_comments
 from competitors import find_competitors
 from limits import check_limits
 from llm import generate_seo
+from thumbnail import critique_thumbnail
 from transcript import fetch_transcript_text
 from youtube import InvalidURLError, VideoNotFoundError, fetch_metadata, parse_video_id
 
@@ -164,6 +165,9 @@ if run:
         with st.spinner("Finding competing videos..."):
             competitors = find_competitors(meta.title, YOUTUBE_API_KEY, exclude_video_id=video_id)
 
+    with st.spinner("Analyzing thumbnail..."):
+        thumbnail_review = critique_thumbnail(GEMINI_API_KEY, meta.thumbnail_url)
+
     with st.spinner("Generating SEO suggestions..."):
         try:
             result = generate_seo(
@@ -198,11 +202,11 @@ if run:
         st.warning("One or more fields exceed YouTube's limits — trim before publishing.")
 
     (
-        tags_tab, titles_tab, description_tab, hashtags_tab,
-        chapters_tab, hook_tab, comments_tab, competitors_tab, suggestions_tab,
+        tags_tab, titles_tab, description_tab, hashtags_tab, chapters_tab,
+        hook_tab, comments_tab, competitors_tab, thumbnail_tab, suggestions_tab,
     ) = st.tabs([
-        "Tags", "Titles", "Description", "Hashtags",
-        "Chapters", "Hook", "Comments", "Competitors", "Suggestions",
+        "Tags", "Titles", "Description", "Hashtags", "Chapters",
+        "Hook", "Comments", "Competitors", "Thumbnail", "Suggestions",
     ])
 
     with tags_tab:
@@ -306,6 +310,22 @@ if run:
                 else:
                     st.caption("No public tags")
                 st.divider()
+
+    with thumbnail_tab:
+        if meta.thumbnail_url:
+            st.image(meta.thumbnail_url, width=320)
+        if not thumbnail_review:
+            st.info("Thumbnail review unavailable for this video.")
+        else:
+            checks = [
+                ("Legible at small size", thumbnail_review.get("legible_at_small_size")),
+                ("Clear focal point", thumbnail_review.get("has_clear_focal_point")),
+                ("Stands out in a busy feed", thumbnail_review.get("stands_out_in_feed")),
+            ]
+            for label, ok in checks:
+                st.markdown(f"{'Yes' if ok else 'No'} — {label}")
+            if thumbnail_review.get("feedback"):
+                st.write(thumbnail_review["feedback"])
 
     with suggestions_tab:
         for i, suggestion in enumerate(suggestions, 1):
