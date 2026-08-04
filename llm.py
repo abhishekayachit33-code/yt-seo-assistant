@@ -1,19 +1,14 @@
 import json
-import re
 
-from groq import Groq
+from google import genai
+from google.genai import types
 
-MODEL = "llama-3.3-70b-versatile"
+MODEL = "gemini-2.5-flash"
 
 SYSTEM_PROMPT = (
     "You are an SEO assistant for YouTube creators. Given a video's title, "
-    "description, existing tags, and transcript (if available), respond with "
-    "ONLY a JSON object, no markdown fences, no commentary, in this exact shape:\n"
-    "{\n"
-    '  "tags": ["...", "..."],\n'
-    '  "chapters": [{"timestamp": "00:00", "title": "..."}],\n'
-    '  "suggestions": ["...", "..."]\n'
-    "}\n"
+    "description, existing tags, and transcript (if available), produce SEO "
+    "assistance for that exact video.\n"
     "Rules:\n"
     "- tags: at least 35 relevant, specific SEO keywords/phrases for this exact video.\n"
     "- chapters: only include if a transcript was provided; first chapter must be "
@@ -22,6 +17,26 @@ SYSTEM_PROMPT = (
     "- suggestions: actionable, specific ideas to improve this video's reach and "
     "content, not generic advice."
 )
+
+SEO_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "tags": {"type": "array", "items": {"type": "string"}},
+        "chapters": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "timestamp": {"type": "string"},
+                    "title": {"type": "string"},
+                },
+                "required": ["timestamp", "title"],
+            },
+        },
+        "suggestions": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["tags", "chapters", "suggestions"],
+}
 
 
 def _build_user_prompt(title: str, description: str, existing_tags: list[str], transcript: str | None) -> str:
@@ -37,14 +52,6 @@ def _build_user_prompt(title: str, description: str, existing_tags: list[str], t
     return "\n\n".join(parts)
 
 
-def _extract_json(raw: str) -> dict:
-    raw = raw.strip()
-    fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", raw, re.DOTALL)
-    if fenced:
-        raw = fenced.group(1)
-    return json.loads(raw)
-
-
 def generate_seo(
     api_key: str,
     title: str,
@@ -52,23 +59,25 @@ def generate_seo(
     existing_tags: list[str],
     transcript: str | None,
 ) -> dict:
-    client = Groq(api_key=api_key)
+    client = genai.Client(api_key=api_key)
     user_prompt = _build_user_prompt(title, description, existing_tags, transcript)
 
-    completion = client.chat.completions.create(
+    response = client.models.generate_content(
         model=MODEL,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0.4,
+        contents=user_prompt,
+        config=types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            response_mime_type="application/json",
+            response_schema=SEO_SCHEMA,
+            temperature=0.4,
+        ),
     )
-    raw = completion.choices[0].message.content
+    raw = response.text
 
     try:
-        data = _extract_json(raw)
+        data = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise ValueError(f"LLM did not return valid JSON: {exc}\nRaw: {raw[:500]}") from exc
+        raise ValueError(f"Model did not return valid JSON: {exc}\nRaw: {raw[:500]}") from exc
 
     data.setdefault("tags", [])
     data.setdefault("chapters", [])
