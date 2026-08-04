@@ -75,7 +75,7 @@ st.markdown(
 )
 
 st.title("YouTube SEO Assistant")
-st.caption("Paste a video URL to generate SEO tags, chapter timestamps, and reach suggestions. Deployed via automated pipeline.")
+st.caption("Paste a video URL to generate SEO tags, chapter timestamps, and reach suggestions. Deployed via automated pipeline which id odne by ABhishek.")
 
 url = st.text_input("YouTube video URL", placeholder="https://www.youtube.com/watch?v=...")
 run = st.button("Analyze")
