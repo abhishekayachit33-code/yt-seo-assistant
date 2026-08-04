@@ -1,8 +1,9 @@
 import json
 from dataclasses import dataclass
 
-from google import genai
 from google.genai import types
+
+from gemini_client import generate_content_with_fallback
 
 MODEL = "gemini-2.5-flash"
 
@@ -123,7 +124,7 @@ def find_output_violations(data: dict, has_transcript: bool) -> list[Violation]:
     return violations
 
 
-def repair_output(client: genai.Client, data: dict, violations: list[Violation]) -> dict:
+def repair_output(api_keys: list[str], data: dict, violations: list[Violation]) -> dict:
     """One follow-up call asking the model to fix only what's wrong. Makes a network call."""
     issues = "; ".join(f"{v.field}: {v.reason}" for v in violations)
     repair_prompt = (
@@ -133,7 +134,8 @@ def repair_output(client: genai.Client, data: dict, violations: list[Violation])
         "issues. Keep everything else the same.\n\n"
         f"Previous response:\n{json.dumps(data)}"
     )
-    response = client.models.generate_content(
+    response = generate_content_with_fallback(
+        api_keys,
         model=MODEL,
         contents=repair_prompt,
         config=types.GenerateContentConfig(
@@ -147,16 +149,16 @@ def repair_output(client: genai.Client, data: dict, violations: list[Violation])
 
 
 def generate_seo(
-    api_key: str,
+    api_keys: list[str],
     title: str,
     description: str,
     existing_tags: list[str],
     transcript: str | None,
 ) -> dict:
-    client = genai.Client(api_key=api_key)
     user_prompt = _build_user_prompt(title, description, existing_tags, transcript)
 
-    response = client.models.generate_content(
+    response = generate_content_with_fallback(
+        api_keys,
         model=MODEL,
         contents=user_prompt,
         config=types.GenerateContentConfig(
@@ -182,7 +184,7 @@ def generate_seo(
     violations = find_output_violations(data, has_transcript=bool(transcript))
     if violations:
         try:
-            data = repair_output(client, data, violations)
+            data = repair_output(api_keys, data, violations)
         except Exception:
             pass  # repair is best-effort; keep the original data if it fails
 

@@ -17,6 +17,7 @@ load_dotenv()
 
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_API_KEYS = [k for k in [GEMINI_API_KEY, os.getenv("GEMINI_API_KEY_2")] if k]
 
 st.set_page_config(page_title="YouTube SEO Assistant", layout="centered")
 
@@ -281,7 +282,7 @@ if run:
 
     with st.spinner("Fetching comments..."):
         top_comments = fetch_top_comments(video_id, YOUTUBE_API_KEY)
-        comment_summary = summarize_comments(GEMINI_API_KEY, top_comments) if top_comments else None
+        comment_summary = summarize_comments(GEMINI_API_KEYS, top_comments) if top_comments else None
 
     competitors = []
     if include_competitors:
@@ -289,12 +290,12 @@ if run:
             competitors = find_competitors(meta.title, YOUTUBE_API_KEY, exclude_video_id=video_id)
 
     with st.spinner("Analyzing thumbnail..."):
-        thumbnail_review = critique_thumbnail(GEMINI_API_KEY, meta.thumbnail_url)
+        thumbnail_review = critique_thumbnail(GEMINI_API_KEYS, meta.thumbnail_url)
 
     with st.spinner("Generating SEO suggestions..."):
         try:
             result = generate_seo(
-                api_key=GEMINI_API_KEY,
+                api_keys=GEMINI_API_KEYS,
                 title=meta.title,
                 description=meta.description,
                 existing_tags=meta.tags,
