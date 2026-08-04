@@ -23,6 +23,7 @@ class VideoMeta:
     description: str
     tags: list[str]
     channel_title: str
+    thumbnail_url: str
 
 
 def parse_video_id(url: str) -> str:
@@ -47,10 +48,16 @@ def fetch_metadata(video_id: str, api_key: str) -> VideoMeta:
     if not items:
         raise VideoNotFoundError(f"No video found for ID: {video_id}")
     snippet = items[0]["snippet"]
+    thumbnails = snippet.get("thumbnails", {})
+    thumbnail_url = (
+        thumbnails.get("high", {}).get("url")
+        or thumbnails.get("default", {}).get("url", "")
+    )
     return VideoMeta(
         video_id=video_id,
         title=snippet.get("title", ""),
         description=snippet.get("description", ""),
         tags=snippet.get("tags", []),
         channel_title=snippet.get("channelTitle", ""),
+        thumbnail_url=thumbnail_url,
     )
