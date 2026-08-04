@@ -1,9 +1,9 @@
 import json
 
 import requests
-from google import genai
 from google.genai import types
 
+from gemini_client import generate_content_with_fallback
 from llm import MODEL
 
 _ENDPOINT = "https://www.googleapis.com/youtube/v3/commentThreads"
@@ -55,20 +55,20 @@ def fetch_top_comments(video_id: str, api_key: str, max_results: int = 50) -> li
     ]
 
 
-def summarize_comments(api_key: str, comments: list[str]) -> dict:
+def summarize_comments(api_keys: list[str], comments: list[str]) -> dict:
     """One Gemini call over already-fetched comment text. Returns empty
     themes with no summary if there's nothing to summarize, or if the call
-    itself fails (rate limit, quota, network) -- comment sentiment is a
-    nice-to-have layered on core analysis and must never crash the page."""
+    itself fails on every available key (rate limit, quota, network) --
+    comment sentiment is a nice-to-have layered on core analysis and must
+    never crash the page."""
     empty = {"positive_themes": [], "negative_themes": [], "summary": ""}
     if not comments:
         return empty
 
     try:
-        client = genai.Client(api_key=api_key)
         numbered = "\n".join(f"{i + 1}. {c}" for i, c in enumerate(comments))
-
-        response = client.models.generate_content(
+        response = generate_content_with_fallback(
+            api_keys,
             model=MODEL,
             contents=f"Comments:\n{numbered}",
             config=types.GenerateContentConfig(

@@ -1,9 +1,9 @@
 import json
 
 import requests
-from google import genai
 from google.genai import types
 
+from gemini_client import generate_content_with_fallback
 from llm import MODEL
 
 _SYSTEM_PROMPT = (
@@ -29,7 +29,7 @@ _SCHEMA = {
 }
 
 
-def critique_thumbnail(api_key: str, thumbnail_url: str) -> dict | None:
+def critique_thumbnail(api_keys: list[str], thumbnail_url: str) -> dict | None:
     """Fetches the thumbnail and sends it to Gemini for critique. Returns None
     on any failure -- this is a nice-to-have, never worth breaking the rest
     of the analysis over."""
@@ -43,8 +43,8 @@ def critique_thumbnail(api_key: str, thumbnail_url: str) -> dict | None:
         return None
 
     try:
-        client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(
+        response = generate_content_with_fallback(
+            api_keys,
             model=MODEL,
             contents=[
                 types.Part.from_bytes(data=image_response.content, mime_type="image/jpeg"),
