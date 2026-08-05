@@ -520,8 +520,6 @@ with st.sidebar:
                 st.session_state["load_row"] = row
                 st.rerun()
 
-    st.caption("Gemini free tier is 20 requests/day per key. One analysis = 1 call, +1 if you run the thumbnail critique.")
-
 st.title(":material/movie_filter: YouTube SEO Studio")
 st.caption("Paste a video URL — get tags, titles, chapters, repurposed copy, and an audience read in one pass.")
 
