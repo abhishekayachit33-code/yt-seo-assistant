@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 
 from comments import fetch_top_comments, summarize_comments
 from competitors import find_competitors
-from db import get_analysis, get_connection, list_recent, save_analysis
+from db import ensure_schema, get_analysis, get_connection, list_recent, save_analysis
 from limits import check_limits
 from llm import generate_seo
 from thumbnail import critique_thumbnail
@@ -219,6 +219,15 @@ def render_core_tabs(tabs: dict, existing_tags: list[str], result: dict) -> None
 
 
 conn = _db_connection()
+if conn is not None and not ensure_schema(conn):
+    # Cached connection has gone stale (e.g. a serverless provider dropped it
+    # after idle suspend). Drop it from the cache and reconnect fresh rather
+    # than serving broken queries against a dead connection for the rest of
+    # this process's life.
+    _db_connection.clear()
+    conn = _db_connection()
+    if conn is not None:
+        ensure_schema(conn)
 
 with st.sidebar:
     st.subheader("Your name")

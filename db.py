@@ -20,7 +20,16 @@ CREATE INDEX IF NOT EXISTS idx_analyses_user_name ON analyses(user_name);
 
 def get_connection() -> psycopg.Connection | None:
     """None if DATABASE_URL isn't set or the DB isn't reachable -- history is
-    a nice-to-have, the app must still work without it."""
+    a nice-to-have, the app must still work without it.
+
+    Deliberately does NOT run the schema here. Callers that cache this
+    connection (e.g. Streamlit's st.cache_resource, which can outlive a code
+    deploy if the host does a script-level reload rather than a full process
+    restart) would otherwise cache a connection from before a later schema
+    change and never pick it up -- exactly what happened when user_name was
+    added: the cached connection predated that code, so the ALTER TABLE
+    never ran against it. Call ensure_schema() separately, every time,
+    regardless of whether the connection itself is cached."""
     database_url = os.getenv("DATABASE_URL")
     if not database_url:
         return None
@@ -29,12 +38,23 @@ def get_connection() -> psycopg.Connection | None:
         # providers (Neon, etc.) suspend on idle and take a few seconds to
         # wake on the next connection -- too tight a timeout here means the
         # first request after idle looks identical to "unreachable".
-        conn = psycopg.connect(database_url, connect_timeout=10)
-        conn.execute(_SCHEMA)
-        conn.commit()
-        return conn
+        return psycopg.connect(database_url, connect_timeout=10)
     except psycopg.OperationalError:
         return None
+
+
+def ensure_schema(conn: psycopg.Connection) -> bool:
+    """Idempotent -- every statement is IF NOT EXISTS, so safe and cheap to
+    call on every request even against a long-lived cached connection.
+    Returns False (rather than raising) if the connection has gone stale,
+    e.g. a serverless provider dropping it after idle suspend."""
+    try:
+        conn.execute(_SCHEMA)
+        conn.commit()
+        return True
+    except psycopg.Error:
+        conn.rollback()
+        return False
 
 
 def save_analysis(conn: psycopg.Connection, user_name: str, video_id: str, title: str, channel: str, result: dict) -> None:
