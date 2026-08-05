@@ -4,7 +4,7 @@ import os
 import streamlit as st
 from dotenv import load_dotenv
 
-from comments import fetch_top_comments, summarize_comments
+from comments import fetch_top_comments
 from competitors import find_competitors
 from db import ensure_schema, get_analysis, get_connection, list_recent, save_analysis
 from limits import check_limits
@@ -132,6 +132,26 @@ def render_limit_checks(title: str, description: str, tags: list[str], hashtags:
     st.markdown(f'<div class="limit-grid">{cards}</div>', unsafe_allow_html=True)
     if any(not c.ok for c in checks):
         st.warning("One or more fields exceed YouTube's limits — trim before publishing.")
+
+
+def render_comment_sentiment(sentiment: dict) -> None:
+    if sentiment and sentiment.get("summary"):
+        st.write(sentiment["summary"])
+    positive = (sentiment or {}).get("positive_themes", [])
+    negative = (sentiment or {}).get("negative_themes", [])
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("**Viewers liked**")
+        for theme in positive:
+            st.markdown(f"- {theme}")
+        if not positive:
+            st.caption("Nothing notable")
+    with col2:
+        st.markdown("**Viewers complained about**")
+        for theme in negative:
+            st.markdown(f"- {theme}")
+        if not negative:
+            st.caption("Nothing notable")
 
 
 def render_core_tabs(tabs: dict, existing_tags: list[str], result: dict) -> None:
@@ -293,9 +313,6 @@ if run:
             st.error(f"Failed to fetch video metadata: {exc}")
             st.stop()
 
-    st.subheader(meta.title)
-    st.caption(meta.channel_title)
-
     with st.spinner("Fetching transcript..."):
         transcript = fetch_transcript_text(video_id)
 
@@ -304,15 +321,11 @@ if run:
 
     with st.spinner("Fetching comments..."):
         top_comments = fetch_top_comments(video_id, YOUTUBE_API_KEY)
-        comment_summary = summarize_comments(GEMINI_API_KEYS, top_comments) if top_comments else None
 
     competitors = []
     if include_competitors:
         with st.spinner("Finding competing videos..."):
             competitors = find_competitors(meta.title, YOUTUBE_API_KEY, exclude_video_id=video_id)
-
-    with st.spinner("Analyzing thumbnail..."):
-        thumbnail_review = critique_thumbnail(GEMINI_API_KEYS, meta.thumbnail_url)
 
     with st.spinner("Generating SEO suggestions..."):
         try:
@@ -322,6 +335,7 @@ if run:
                 description=meta.description,
                 existing_tags=meta.tags,
                 transcript=transcript,
+                comments=top_comments,
             )
         except Exception as exc:
             st.error(f"LLM request failed: {exc}")
@@ -332,6 +346,53 @@ if run:
             save_analysis(conn, user_name, video_id, meta.title, meta.channel_title, result)
         except Exception:
             pass  # history is best-effort, never block the page over it
+
+    # Persisted rather than rendered inline: the on-demand thumbnail button
+    # below triggers its own script rerun, which would otherwise wipe out
+    # everything computed in this block before it gets a chance to render.
+    st.session_state["current_analysis"] = {
+        "meta": meta, "result": result, "top_comments": top_comments,
+        "competitors": competitors, "include_competitors": include_competitors,
+    }
+    st.session_state.pop("thumbnail_review", None)
+
+if st.session_state.get("load_row"):
+    row = st.session_state["load_row"]
+    result = get_analysis(conn, user_name, row["id"]) if conn is not None else None
+
+    if result is None:
+        st.warning("Saved analysis not found — it may have been deleted.")
+    else:
+        st.subheader(row["title"])
+        st.caption(f"{row['channel']} · saved {row['analyzed_at']:%Y-%m-%d %H:%M}")
+        st.info("Loaded from history — no API quota spent. Competitors and thumbnail review are not stored; re-run Analyze for those.")
+
+        render_limit_checks(row["title"], result.get("description", ""), result.get("tags", []), result.get("hashtags", []))
+
+        (tags_tab, titles_tab, description_tab, hashtags_tab, chapters_tab, hook_tab, comments_tab, suggestions_tab) = st.tabs(
+            ["Tags", "Titles", "Description", "Hashtags", "Chapters", "Hook", "Comments", "Suggestions"]
+        )
+        render_core_tabs(
+            {
+                "tags": tags_tab, "titles": titles_tab, "description": description_tab,
+                "hashtags": hashtags_tab, "chapters": chapters_tab, "hook": hook_tab,
+                "suggestions": suggestions_tab,
+            },
+            [], result,
+        )
+        with comments_tab:
+            render_comment_sentiment(result.get("comment_sentiment", {}))
+
+elif st.session_state.get("current_analysis"):
+    data = st.session_state["current_analysis"]
+    meta = data["meta"]
+    result = data["result"]
+    top_comments = data["top_comments"]
+    competitors = data["competitors"]
+    include_competitors = data["include_competitors"]
+
+    st.subheader(meta.title)
+    st.caption(meta.channel_title)
 
     render_limit_checks(meta.title, result.get("description", ""), result.get("tags", []), result.get("hashtags", []))
 
@@ -357,23 +418,7 @@ if run:
             st.info("No comments available for this video (comments may be disabled).")
         else:
             st.caption(f"Based on the top {len(top_comments)} comments by relevance")
-            if comment_summary and comment_summary.get("summary"):
-                st.write(comment_summary["summary"])
-            positive = (comment_summary or {}).get("positive_themes", [])
-            negative = (comment_summary or {}).get("negative_themes", [])
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown("**Viewers liked**")
-                for theme in positive:
-                    st.markdown(f"- {theme}")
-                if not positive:
-                    st.caption("Nothing notable")
-            with col2:
-                st.markdown("**Viewers complained about**")
-                for theme in negative:
-                    st.markdown(f"- {theme}")
-                if not negative:
-                    st.caption("Nothing notable")
+            render_comment_sentiment(result.get("comment_sentiment", {}))
 
     with competitors_tab:
         if not include_competitors:
@@ -394,7 +439,14 @@ if run:
     with thumbnail_tab:
         if meta.thumbnail_url:
             st.image(meta.thumbnail_url, width=320)
-        if not thumbnail_review:
+
+        thumbnail_review = st.session_state.get("thumbnail_review")
+        if thumbnail_review is None:
+            if st.button("Run Thumbnail Vision Critique"):
+                with st.spinner("Analyzing thumbnail..."):
+                    st.session_state["thumbnail_review"] = critique_thumbnail(GEMINI_API_KEYS, meta.thumbnail_url) or {}
+                st.rerun()
+        elif not thumbnail_review:
             st.info("Thumbnail review unavailable for this video.")
         else:
             checks = [
@@ -406,28 +458,3 @@ if run:
                 st.markdown(f"{'Yes' if ok else 'No'} — {label}")
             if thumbnail_review.get("feedback"):
                 st.write(thumbnail_review["feedback"])
-
-elif st.session_state.get("load_row"):
-    row = st.session_state["load_row"]
-    result = get_analysis(conn, user_name, row["id"]) if conn is not None else None
-
-    if result is None:
-        st.warning("Saved analysis not found — it may have been deleted.")
-    else:
-        st.subheader(row["title"])
-        st.caption(f"{row['channel']} · saved {row['analyzed_at']:%Y-%m-%d %H:%M}")
-        st.info("Loaded from history — no API quota spent. Comments, competitors, and thumbnail review are not stored; re-run Analyze for those.")
-
-        render_limit_checks(row["title"], result.get("description", ""), result.get("tags", []), result.get("hashtags", []))
-
-        (tags_tab, titles_tab, description_tab, hashtags_tab, chapters_tab, hook_tab, suggestions_tab) = st.tabs(
-            ["Tags", "Titles", "Description", "Hashtags", "Chapters", "Hook", "Suggestions"]
-        )
-        render_core_tabs(
-            {
-                "tags": tags_tab, "titles": titles_tab, "description": description_tab,
-                "hashtags": hashtags_tab, "chapters": chapters_tab, "hook": hook_tab,
-                "suggestions": suggestions_tab,
-            },
-            [], result,
-        )
