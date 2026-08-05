@@ -23,7 +23,11 @@ def get_connection() -> psycopg.Connection | None:
     if not database_url:
         return None
     try:
-        conn = psycopg.connect(database_url, connect_timeout=3)
+        # 3s was tuned for the always-on in-cluster Postgres. Serverless
+        # providers (Neon, etc.) suspend on idle and take a few seconds to
+        # wake on the next connection -- too tight a timeout here means the
+        # first request after idle looks identical to "unreachable".
+        conn = psycopg.connect(database_url, connect_timeout=10)
         conn.execute(_SCHEMA)
         conn.commit()
         return conn
