@@ -53,7 +53,10 @@ def ensure_schema(conn: psycopg.Connection) -> bool:
         conn.commit()
         return True
     except psycopg.Error:
-        conn.rollback()
+        try:
+            conn.rollback()
+        except psycopg.Error:
+            pass  # connection itself is dead, not just the transaction -- nothing to roll back
         return False
 
 

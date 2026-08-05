@@ -26,7 +26,12 @@ SYSTEM_PROMPT = (
     "suited to appear above the title on YouTube.\n"
     "- hook_analysis: judge only the first ~30 seconds of the transcript (if "
     "available) on whether it hooks a viewer fast enough. If no transcript is "
-    'available, set verdict to "unavailable" and leave reasoning and rewrite empty.'
+    'available, set verdict to "unavailable" and leave reasoning and rewrite empty.\n'
+    "- comment_sentiment: given the viewer comments (if provided), identify what "
+    "viewers praised and what they complained about. Be specific -- reference actual "
+    "themes in the comments, not generic observations. If comments are overwhelmingly "
+    "positive or negative, it is fine for one list to be empty. If no comments were "
+    "provided, return empty lists and an empty summary."
 )
 
 SEO_SCHEMA = {
@@ -57,10 +62,19 @@ SEO_SCHEMA = {
             },
             "required": ["verdict", "reasoning", "rewrite"],
         },
+        "comment_sentiment": {
+            "type": "object",
+            "properties": {
+                "positive_themes": {"type": "array", "items": {"type": "string"}},
+                "negative_themes": {"type": "array", "items": {"type": "string"}},
+                "summary": {"type": "string"},
+            },
+            "required": ["positive_themes", "negative_themes", "summary"],
+        },
     },
     "required": [
         "tags", "chapters", "suggestions", "titles",
-        "description", "hashtags", "hook_analysis",
+        "description", "hashtags", "hook_analysis", "comment_sentiment",
     ],
 }
 
@@ -74,7 +88,13 @@ class Violation:
     reason: str
 
 
-def _build_user_prompt(title: str, description: str, existing_tags: list[str], transcript: str | None) -> str:
+def _build_user_prompt(
+    title: str,
+    description: str,
+    existing_tags: list[str],
+    transcript: str | None,
+    comments: list[str] | None = None,
+) -> str:
     parts = [
         f"Title: {title}",
         f"Existing tags: {', '.join(existing_tags) if existing_tags else '(none)'}",
@@ -84,6 +104,11 @@ def _build_user_prompt(title: str, description: str, existing_tags: list[str], t
         parts.append(f"Transcript:\n{transcript}")
     else:
         parts.append("Transcript: (not available for this video)")
+    if comments:
+        numbered = "\n".join(f"{i + 1}. {c}" for i, c in enumerate(comments))
+        parts.append(f"Viewer comments:\n{numbered}")
+    else:
+        parts.append("Viewer comments: (none available for this video)")
     return "\n\n".join(parts)
 
 
@@ -154,8 +179,9 @@ def generate_seo(
     description: str,
     existing_tags: list[str],
     transcript: str | None,
+    comments: list[str] | None = None,
 ) -> dict:
-    user_prompt = _build_user_prompt(title, description, existing_tags, transcript)
+    user_prompt = _build_user_prompt(title, description, existing_tags, transcript, comments)
 
     response = generate_content_with_fallback(
         api_keys,
@@ -178,6 +204,7 @@ def generate_seo(
         ("tags", []), ("chapters", []), ("suggestions", []),
         ("titles", []), ("description", ""), ("hashtags", []),
         ("hook_analysis", {"verdict": "", "reasoning": "", "rewrite": ""}),
+        ("comment_sentiment", {"positive_themes": [], "negative_themes": [], "summary": ""}),
     ):
         data.setdefault(key, default)
 
