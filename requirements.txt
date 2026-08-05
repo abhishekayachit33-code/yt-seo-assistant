@@ -1,4 +1,4 @@
-streamlit>=1.38
+streamlit>=1.60
 requests>=2.31
 python-dotenv>=1.0
 youtube-transcript-api>=1.0,<2

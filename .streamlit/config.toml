@@ -1,10 +1,72 @@
+# "Studio" theme -- dark-first, vivid rose accent, Inter + JetBrains Mono.
+# Both [theme.light] and [theme.dark] are defined so the in-app theme toggle works.
 [theme]
-base = "light"
-primaryColor = "#1A73E8"
+base = "dark"
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
+codeFont = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
+baseFontSize = 15
+baseFontWeight = 400
+codeFontSize = "0.85rem"
+headingFontSizes = ["34px", "25px", "20px", "17px", "15px", "13px"]
+headingFontWeights = [800, 700, 600, 600, 500, 500]
+baseRadius = "10px"
+buttonRadius = "full"
+linkUnderline = false
+showWidgetBorder = true
+showSidebarBorder = false
+chartCategoricalColors = ["#FF3D6E", "#A78BFA", "#22D3EE", "#FBBF24", "#34D399", "#60A5FA", "#FB923C"]
+
+[theme.dark]
+primaryColor = "#FF3D6E"
+backgroundColor = "#0A0A0F"
+secondaryBackgroundColor = "#15151F"
+codeBackgroundColor = "#15151F"
+textColor = "#ECECF1"
+linkColor = "#FF7A9C"
+borderColor = "#2A2A38"
+codeTextColor = "#E4E4E7"
+dataframeBorderColor = "#2A2A38"
+dataframeHeaderBackgroundColor = "#15151F"
+redColor = "#FF3D6E"
+orangeColor = "#FB923C"
+yellowColor = "#FBBF24"
+greenColor = "#34D399"
+blueColor = "#60A5FA"
+violetColor = "#A78BFA"
+grayColor = "#8B8B9E"
+
+[theme.dark.sidebar]
+backgroundColor = "#07070B"
+secondaryBackgroundColor = "#15151F"
+codeBackgroundColor = "#15151F"
+borderColor = "#1E1E2A"
+primaryColor = "#FF3D6E"
+
+[theme.light]
+primaryColor = "#E11D48"
 backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#F0F4FA"
-textColor = "#1A1A1A"
-font = "sans serif"
+secondaryBackgroundColor = "#F6F6F9"
+codeBackgroundColor = "#F6F6F9"
+textColor = "#18181B"
+linkColor = "#E11D48"
+borderColor = "#E4E4E7"
+codeTextColor = "#27272A"
+dataframeBorderColor = "#E4E4E7"
+dataframeHeaderBackgroundColor = "#F6F6F9"
+redColor = "#E11D48"
+orangeColor = "#EA580C"
+yellowColor = "#CA8A04"
+greenColor = "#059669"
+blueColor = "#2563EB"
+violetColor = "#7C3AED"
+grayColor = "#71717A"
+
+[theme.light.sidebar]
+backgroundColor = "#FAFAFC"
+secondaryBackgroundColor = "#F1F1F5"
+codeBackgroundColor = "#F1F1F5"
+borderColor = "#E4E4E7"
+primaryColor = "#E11D48"
 
 [browser]
 gatherUsageStats = false
