@@ -1,16 +1,21 @@
 import html
 import os
 
+import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
 from comments import fetch_top_comments
-from competitors import find_competitors
-from db import ensure_schema, get_analysis, get_connection, list_recent, save_analysis
-from limits import check_limits
+from competitors import find_competitors, tag_gap
+from db import ensure_schema, get_analysis, get_cached_analysis, get_connection, list_recent, save_analysis
+from export import build_csv_export, build_json_export, build_pdf_export
+from keywords import top_ngrams
+from limits import check_limits, compute_health_score
 from llm import generate_seo
+from pacing import SILENT_GAP_THRESHOLD_SECONDS, find_silent_gaps, words_per_minute_blocks
+from seo_diff import diff_description, diff_tags
 from thumbnail import critique_thumbnail
-from transcript import fetch_transcript_text
+from transcript import fetch_transcript_segments, segments_to_text
 from youtube import InvalidURLError, VideoNotFoundError, fetch_metadata, parse_video_id
 
 load_dotenv()
@@ -132,6 +137,61 @@ def render_limit_checks(title: str, description: str, tags: list[str], hashtags:
     st.markdown(f'<div class="limit-grid">{cards}</div>', unsafe_allow_html=True)
     if any(not c.ok for c in checks):
         st.warning("One or more fields exceed YouTube's limits — trim before publishing.")
+
+
+def render_health_score(title: str, description: str, tags: list[str], hashtags: list[str]) -> None:
+    score, rules = compute_health_score(title, description, tags, hashtags)
+    st.metric("Metadata Health Score", f"{score}%")
+    with st.expander("Compliance checklist"):
+        for r in rules:
+            st.markdown(f"{'PASS' if r.passed else 'FAIL'} — **{r.label}** ({r.detail})")
+
+
+def render_export_buttons(video_id: str, title: str, result: dict) -> None:
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.download_button(
+            "Download JSON", build_json_export(title, result),
+            file_name=f"{video_id}-seo-report.json", mime="application/json",
+            use_container_width=True,
+        )
+    with col2:
+        st.download_button(
+            "Download CSV", build_csv_export(title, result),
+            file_name=f"{video_id}-seo-report.csv", mime="text/csv",
+            use_container_width=True,
+        )
+    with col3:
+        st.download_button(
+            "Download PDF", build_pdf_export(title, result),
+            file_name=f"{video_id}-seo-report.pdf", mime="application/pdf",
+            use_container_width=True,
+        )
+
+
+def render_shorts_scripts(result: dict) -> None:
+    scripts = result.get("shorts_scripts", [])
+    if not scripts:
+        st.info("No short-form script concepts generated.")
+        return
+    for i, s in enumerate(scripts, 1):
+        st.markdown(f"**Concept {i}: {s.get('hook_line', '')}**")
+        st.text_area(
+            f"Script {i}", s.get("script", ""), height=150,
+            label_visibility="collapsed", key=f"shorts-script-{i}",
+        )
+        st.caption(s.get("caption", ""))
+        st.divider()
+
+
+def render_social_posts(result: dict) -> None:
+    posts = result.get("social_posts", {})
+    st.markdown("**Twitter/X thread**")
+    st.text_area("Twitter thread", posts.get("twitter_thread", ""), height=150, label_visibility="collapsed", key="social-twitter")
+    st.markdown("**LinkedIn post**")
+    st.text_area("LinkedIn post", posts.get("linkedin_post", ""), height=150, label_visibility="collapsed", key="social-linkedin")
+    st.markdown("**YouTube Community post**")
+    st.text_area("Community post", posts.get("community_post", ""), height=100, label_visibility="collapsed", key="social-community")
 
 
 def render_comment_sentiment(sentiment: dict) -> None:
@@ -263,9 +323,13 @@ with st.sidebar:
     elif not user_name:
         st.caption("Enter your name above to see your saved analyses.")
     else:
-        recent = list_recent(conn, user_name)
+        history_search = st.text_input(
+            "Search history", key="history_search", placeholder="Search by title or channel...",
+            label_visibility="collapsed",
+        ).strip()
+        recent = list_recent(conn, user_name, search=history_search)
         if not recent:
-            st.caption("No saved analyses yet.")
+            st.caption("No matching analyses." if history_search else "No saved analyses yet.")
         for row in recent:
             label = row["title"][:40] + ("…" if len(row["title"]) > 40 else "")
             if st.button(label, key=f"hist-{row['id']}", use_container_width=True):
@@ -314,10 +378,11 @@ if run:
             st.stop()
 
     with st.spinner("Fetching transcript..."):
-        transcript = fetch_transcript_text(video_id)
+        transcript_segments = fetch_transcript_segments(video_id)
+        transcript = segments_to_text(transcript_segments) if transcript_segments else None
 
     if not transcript:
-        st.info("No transcript available for this video. Tags, chapters, and hook analysis will be limited.")
+        st.info("No transcript available for this video. Tags, chapters, hook analysis, keyword density, and pacing will be limited.")
 
     with st.spinner("Fetching comments..."):
         top_comments = fetch_top_comments(video_id, YOUTUBE_API_KEY)
@@ -327,25 +392,30 @@ if run:
         with st.spinner("Finding competing videos..."):
             competitors = find_competitors(meta.title, YOUTUBE_API_KEY, exclude_video_id=video_id)
 
-    with st.spinner("Generating SEO suggestions..."):
-        try:
-            result = generate_seo(
-                api_keys=GEMINI_API_KEYS,
-                title=meta.title,
-                description=meta.description,
-                existing_tags=meta.tags,
-                transcript=transcript,
-                comments=top_comments,
-            )
-        except Exception as exc:
-            st.error(f"LLM request failed: {exc}")
-            st.stop()
+    cached_result = get_cached_analysis(conn, user_name, video_id) if conn is not None else None
+    if cached_result is not None:
+        result = cached_result
+        st.info("This video was analyzed before — loaded from history, 0 Gemini calls spent.")
+    else:
+        with st.spinner("Generating SEO suggestions..."):
+            try:
+                result = generate_seo(
+                    api_keys=GEMINI_API_KEYS,
+                    title=meta.title,
+                    description=meta.description,
+                    existing_tags=meta.tags,
+                    transcript=transcript,
+                    comments=top_comments,
+                )
+            except Exception as exc:
+                st.error(f"LLM request failed: {exc}")
+                st.stop()
 
-    if conn is not None:
-        try:
-            save_analysis(conn, user_name, video_id, meta.title, meta.channel_title, result)
-        except Exception:
-            pass  # history is best-effort, never block the page over it
+        if conn is not None:
+            try:
+                save_analysis(conn, user_name, video_id, meta.title, meta.channel_title, result)
+            except Exception:
+                pass  # history is best-effort, never block the page over it
 
     # Persisted rather than rendered inline: the on-demand thumbnail button
     # below triggers its own script rerun, which would otherwise wipe out
@@ -353,6 +423,7 @@ if run:
     st.session_state["current_analysis"] = {
         "meta": meta, "result": result, "top_comments": top_comments,
         "competitors": competitors, "include_competitors": include_competitors,
+        "transcript_segments": transcript_segments, "transcript_text": transcript,
     }
     st.session_state.pop("thumbnail_review", None)
 
@@ -365,13 +436,22 @@ if st.session_state.get("load_row"):
     else:
         st.subheader(row["title"])
         st.caption(f"{row['channel']} · saved {row['analyzed_at']:%Y-%m-%d %H:%M}")
-        st.info("Loaded from history — no API quota spent. Competitors and thumbnail review are not stored; re-run Analyze for those.")
+        st.info(
+            "Loaded from history — no API quota spent. Competitors, thumbnail review, "
+            "SEO diff, keyword density, and pacing are not stored; re-run Analyze for those."
+        )
 
+        render_health_score(row["title"], result.get("description", ""), result.get("tags", []), result.get("hashtags", []))
+        render_export_buttons(row["video_id"], row["title"], result)
         render_limit_checks(row["title"], result.get("description", ""), result.get("tags", []), result.get("hashtags", []))
 
-        (tags_tab, titles_tab, description_tab, hashtags_tab, chapters_tab, hook_tab, comments_tab, suggestions_tab) = st.tabs(
-            ["Tags", "Titles", "Description", "Hashtags", "Chapters", "Hook", "Comments", "Suggestions"]
-        )
+        (
+            tags_tab, titles_tab, description_tab, hashtags_tab, chapters_tab,
+            hook_tab, comments_tab, shorts_tab, social_tab, suggestions_tab,
+        ) = st.tabs([
+            "Tags", "Titles", "Description", "Hashtags", "Chapters",
+            "Hook", "Comments", "Shorts Script", "Social Posts", "Suggestions",
+        ])
         render_core_tabs(
             {
                 "tags": tags_tab, "titles": titles_tab, "description": description_tab,
@@ -382,6 +462,10 @@ if st.session_state.get("load_row"):
         )
         with comments_tab:
             render_comment_sentiment(result.get("comment_sentiment", {}))
+        with shorts_tab:
+            render_shorts_scripts(result)
+        with social_tab:
+            render_social_posts(result)
 
 elif st.session_state.get("current_analysis"):
     data = st.session_state["current_analysis"]
@@ -390,18 +474,24 @@ elif st.session_state.get("current_analysis"):
     top_comments = data["top_comments"]
     competitors = data["competitors"]
     include_competitors = data["include_competitors"]
+    transcript_segments = data["transcript_segments"]
+    transcript_text = data["transcript_text"]
 
     st.subheader(meta.title)
     st.caption(meta.channel_title)
 
+    render_health_score(meta.title, result.get("description", ""), result.get("tags", []), result.get("hashtags", []))
+    render_export_buttons(meta.video_id, meta.title, result)
     render_limit_checks(meta.title, result.get("description", ""), result.get("tags", []), result.get("hashtags", []))
 
     (
         tags_tab, titles_tab, description_tab, hashtags_tab, chapters_tab,
         hook_tab, comments_tab, competitors_tab, thumbnail_tab, suggestions_tab,
+        seo_diff_tab, keywords_tab, pacing_tab, shorts_tab, social_tab,
     ) = st.tabs([
         "Tags", "Titles", "Description", "Hashtags", "Chapters",
         "Hook", "Comments", "Competitors", "Thumbnail", "Suggestions",
+        "SEO Diff", "Keywords", "Pacing", "Shorts Script", "Social Posts",
     ])
 
     render_core_tabs(
@@ -435,6 +525,77 @@ elif st.session_state.get("current_analysis"):
                 else:
                     st.caption("No public tags")
                 st.divider()
+
+            st.markdown("**Keyword gap vs. competitors**")
+            gaps = tag_gap(meta.tags + result.get("tags", []), competitors)
+            if gaps:
+                st.caption("Tags your competitors use that you don't have yet, ranked by how many share them")
+                chips = "".join(f"<span>{html.escape(t)} · {n}</span>" for t, n in gaps)
+                st.markdown(f'<div class="tag-chips">{chips}</div>', unsafe_allow_html=True)
+            else:
+                st.caption("No keyword gaps found — your tags already cover what competitors use.")
+
+    with seo_diff_tab:
+        tag_diff = diff_tags(meta.tags, result.get("tags", []))
+        st.caption(f"{len(tag_diff.added)} new tags suggested · {len(tag_diff.kept)} kept · {len(tag_diff.removed)} of your existing tags dropped")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Added**")
+            for t in tag_diff.added:
+                st.markdown(f"- {t}")
+            if not tag_diff.added:
+                st.caption("None")
+        with col2:
+            st.markdown("**Dropped**")
+            for t in tag_diff.removed:
+                st.markdown(f"- {t}")
+            if not tag_diff.removed:
+                st.caption("None")
+        st.divider()
+        st.markdown("**Description changes**")
+        description_diff = diff_description(meta.description, result.get("description", ""))
+        if description_diff:
+            st.code("\n".join(description_diff), language="diff")
+        else:
+            st.caption("No meaningful description changes.")
+
+    with keywords_tab:
+        if not transcript_text:
+            st.info("Keyword density needs a transcript, which was not available for this video.")
+        else:
+            bigrams = top_ngrams(transcript_text, 2)
+            trigrams = top_ngrams(transcript_text, 3)
+            st.caption("Top 2-word phrases")
+            if bigrams:
+                st.bar_chart(pd.DataFrame({"count": dict(bigrams)}))
+            else:
+                st.caption("Not enough transcript text for 2-word phrases.")
+            st.caption("Top 3-word phrases")
+            if trigrams:
+                st.bar_chart(pd.DataFrame({"count": dict(trigrams)}))
+            else:
+                st.caption("Not enough transcript text for 3-word phrases.")
+
+    with pacing_tab:
+        if not transcript_segments:
+            st.info("Pacing analysis needs a transcript, which was not available for this video.")
+        else:
+            blocks = words_per_minute_blocks(transcript_segments)
+            df = pd.DataFrame({"WPM": [b.wpm for b in blocks]}, index=[f"{b.minute}m" for b in blocks])
+            st.line_chart(df)
+            gaps = find_silent_gaps(transcript_segments)
+            if gaps:
+                st.caption(f"{len(gaps)} silent gap(s) longer than {SILENT_GAP_THRESHOLD_SECONDS:.0f}s")
+                for g in gaps[:10]:
+                    st.markdown(f"- {g.start:.0f}s to {g.end:.0f}s ({g.duration:.1f}s gap)")
+            else:
+                st.caption("No notable silent gaps detected.")
+
+    with shorts_tab:
+        render_shorts_scripts(result)
+
+    with social_tab:
+        render_social_posts(result)
 
     with thumbnail_tab:
         if meta.thumbnail_url:

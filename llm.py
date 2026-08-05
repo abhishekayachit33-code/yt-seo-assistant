@@ -31,7 +31,15 @@ SYSTEM_PROMPT = (
     "viewers praised and what they complained about. Be specific -- reference actual "
     "themes in the comments, not generic observations. If comments are overwhelmingly "
     "positive or negative, it is fine for one list to be empty. If no comments were "
-    "provided, return empty lists and an empty summary."
+    "provided, return empty lists and an empty summary.\n"
+    "- shorts_scripts: 3 short-form vertical video (YouTube Shorts/Reels/TikTok) script "
+    "concepts derived from this video's content, each under 60 seconds spoken. Each needs "
+    "a hook_line (first line, must grab attention in <3 seconds), a script (the full "
+    "spoken script), and a caption (short social caption with hashtags).\n"
+    "- social_posts: ready-to-post promotional text for this video on three platforms: "
+    "twitter_thread (a 3-5 tweet thread as a single string with tweets separated by "
+    "blank lines), linkedin_post (a professional-toned post), and community_post (a "
+    "short, casual YouTube Community tab post)."
 )
 
 SEO_SCHEMA = {
@@ -71,10 +79,32 @@ SEO_SCHEMA = {
             },
             "required": ["positive_themes", "negative_themes", "summary"],
         },
+        "shorts_scripts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "hook_line": {"type": "string"},
+                    "script": {"type": "string"},
+                    "caption": {"type": "string"},
+                },
+                "required": ["hook_line", "script", "caption"],
+            },
+        },
+        "social_posts": {
+            "type": "object",
+            "properties": {
+                "twitter_thread": {"type": "string"},
+                "linkedin_post": {"type": "string"},
+                "community_post": {"type": "string"},
+            },
+            "required": ["twitter_thread", "linkedin_post", "community_post"],
+        },
     },
     "required": [
         "tags", "chapters", "suggestions", "titles",
         "description", "hashtags", "hook_analysis", "comment_sentiment",
+        "shorts_scripts", "social_posts",
     ],
 }
 
@@ -205,6 +235,8 @@ def generate_seo(
         ("titles", []), ("description", ""), ("hashtags", []),
         ("hook_analysis", {"verdict": "", "reasoning": "", "rewrite": ""}),
         ("comment_sentiment", {"positive_themes": [], "negative_themes": [], "summary": ""}),
+        ("shorts_scripts", []),
+        ("social_posts", {"twitter_thread": "", "linkedin_post": "", "community_post": ""}),
     ):
         data.setdefault(key, default)
 

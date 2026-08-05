@@ -1,3 +1,4 @@
+from collections import Counter
 from dataclasses import dataclass
 
 import requests
@@ -62,3 +63,16 @@ def find_competitors(title: str, api_key: str, exclude_video_id: str, max_result
         )
         for item in videos_response.json().get("items", [])
     ]
+
+
+def tag_gap(video_tags: list[str], competitors: list[CompetitorVideo], top_k: int = 15) -> list[tuple[str, int]]:
+    """Tags competitors use that this video's own tag list (existing +
+    generated) is missing, ranked by how many competitors share them --
+    high count = a keyword the competition agrees on that this video skipped."""
+    own_lower = {t.lower() for t in video_tags}
+    counts = Counter()
+    for c in competitors:
+        for t in c.tags:
+            if t.lower() not in own_lower:
+                counts[t] += 1
+    return counts.most_common(top_k)
