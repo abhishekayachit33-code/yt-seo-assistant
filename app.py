@@ -221,11 +221,20 @@ def render_core_tabs(tabs: dict, existing_tags: list[str], result: dict) -> None
 conn = _db_connection()
 
 with st.sidebar:
+    st.subheader("Your name")
+    user_name = st.text_input(
+        "Your name", key="user_name", placeholder="e.g. Abhishek",
+        label_visibility="collapsed",
+        help="Separates your saved history from everyone else's using this app.",
+    ).strip()
+
     st.subheader("History")
     if conn is None:
         st.caption("Database not connected — history unavailable this session.")
+    elif not user_name:
+        st.caption("Enter your name above to see your saved analyses.")
     else:
-        recent = list_recent(conn)
+        recent = list_recent(conn, user_name)
         if not recent:
             st.caption("No saved analyses yet.")
         for row in recent:
@@ -249,6 +258,10 @@ if run:
 
     if not YOUTUBE_API_KEY or not GEMINI_API_KEY:
         st.error("Missing YOUTUBE_API_KEY or GEMINI_API_KEY. Add them to your .env file.")
+        st.stop()
+
+    if conn is not None and not user_name:
+        st.warning("Enter your name in the sidebar first, so your history stays separate from other users'.")
         st.stop()
 
     if not url:
@@ -307,7 +320,7 @@ if run:
 
     if conn is not None:
         try:
-            save_analysis(conn, video_id, meta.title, meta.channel_title, result)
+            save_analysis(conn, user_name, video_id, meta.title, meta.channel_title, result)
         except Exception:
             pass  # history is best-effort, never block the page over it
 
@@ -387,7 +400,7 @@ if run:
 
 elif st.session_state.get("load_row"):
     row = st.session_state["load_row"]
-    result = get_analysis(conn, row["id"]) if conn is not None else None
+    result = get_analysis(conn, user_name, row["id"]) if conn is not None else None
 
     if result is None:
         st.warning("Saved analysis not found — it may have been deleted.")

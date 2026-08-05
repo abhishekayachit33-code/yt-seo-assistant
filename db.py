@@ -13,6 +13,8 @@ CREATE TABLE IF NOT EXISTS analyses (
     analyzed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     result_json JSONB NOT NULL
 );
+ALTER TABLE analyses ADD COLUMN IF NOT EXISTS user_name TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_analyses_user_name ON analyses(user_name);
 """
 
 
@@ -35,18 +37,19 @@ def get_connection() -> psycopg.Connection | None:
         return None
 
 
-def save_analysis(conn: psycopg.Connection, video_id: str, title: str, channel: str, result: dict) -> None:
+def save_analysis(conn: psycopg.Connection, user_name: str, video_id: str, title: str, channel: str, result: dict) -> None:
     conn.execute(
-        "INSERT INTO analyses (video_id, title, channel, result_json) VALUES (%s, %s, %s, %s)",
-        (video_id, title, channel, Jsonb(result)),
+        "INSERT INTO analyses (user_name, video_id, title, channel, result_json) VALUES (%s, %s, %s, %s, %s)",
+        (user_name, video_id, title, channel, Jsonb(result)),
     )
     conn.commit()
 
 
-def list_recent(conn: psycopg.Connection, limit: int = 10) -> list[dict]:
+def list_recent(conn: psycopg.Connection, user_name: str, limit: int = 10) -> list[dict]:
     rows = conn.execute(
-        "SELECT id, video_id, title, channel, analyzed_at FROM analyses ORDER BY analyzed_at DESC LIMIT %s",
-        (limit,),
+        "SELECT id, video_id, title, channel, analyzed_at FROM analyses "
+        "WHERE user_name = %s ORDER BY analyzed_at DESC LIMIT %s",
+        (user_name, limit),
     ).fetchall()
     return [
         {"id": r[0], "video_id": r[1], "title": r[2], "channel": r[3], "analyzed_at": r[4]}
@@ -54,9 +57,12 @@ def list_recent(conn: psycopg.Connection, limit: int = 10) -> list[dict]:
     ]
 
 
-def get_analysis(conn: psycopg.Connection, analysis_id: int) -> dict | None:
+def get_analysis(conn: psycopg.Connection, user_name: str, analysis_id: int) -> dict | None:
+    """Scoped to user_name too, not just id -- otherwise one user could load
+    another's saved analysis by guessing/incrementing the id."""
     row = conn.execute(
-        "SELECT result_json FROM analyses WHERE id = %s", (analysis_id,)
+        "SELECT result_json FROM analyses WHERE id = %s AND user_name = %s",
+        (analysis_id, user_name),
     ).fetchone()
     if row is None:
         return None
