@@ -1,72 +1,74 @@
-# "Studio" theme -- dark-first, vivid rose accent, Inter + JetBrains Mono.
-# Both [theme.light] and [theme.dark] are defined so the in-app theme toggle works.
+# "Press" theme -- editorial/print inspired: warm paper, serif display headings,
+# terracotta accent, sharp corners. Both light and dark variants are defined so
+# the in-app theme toggle works.
 [theme]
-base = "dark"
-font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
-codeFont = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
-baseFontSize = 15
+base = "light"
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+headingFont = "Fraunces:https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700;9..144,900&display=swap"
+codeFont = "'IBM Plex Mono':https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&display=swap"
+baseFontSize = 16
 baseFontWeight = 400
-codeFontSize = "0.85rem"
-headingFontSizes = ["34px", "25px", "20px", "17px", "15px", "13px"]
-headingFontWeights = [800, 700, 600, 600, 500, 500]
-baseRadius = "10px"
-buttonRadius = "full"
-linkUnderline = false
+codeFontSize = "0.83rem"
+headingFontSizes = ["42px", "31px", "24px", "19px", "16px", "14px"]
+headingFontWeights = [900, 700, 700, 600, 600, 600]
+baseRadius = "3px"
+buttonRadius = "3px"
+linkUnderline = true
 showWidgetBorder = true
-showSidebarBorder = false
-chartCategoricalColors = ["#FF3D6E", "#A78BFA", "#22D3EE", "#FBBF24", "#34D399", "#60A5FA", "#FB923C"]
-
-[theme.dark]
-primaryColor = "#FF3D6E"
-backgroundColor = "#0A0A0F"
-secondaryBackgroundColor = "#15151F"
-codeBackgroundColor = "#15151F"
-textColor = "#ECECF1"
-linkColor = "#FF7A9C"
-borderColor = "#2A2A38"
-codeTextColor = "#E4E4E7"
-dataframeBorderColor = "#2A2A38"
-dataframeHeaderBackgroundColor = "#15151F"
-redColor = "#FF3D6E"
-orangeColor = "#FB923C"
-yellowColor = "#FBBF24"
-greenColor = "#34D399"
-blueColor = "#60A5FA"
-violetColor = "#A78BFA"
-grayColor = "#8B8B9E"
-
-[theme.dark.sidebar]
-backgroundColor = "#07070B"
-secondaryBackgroundColor = "#15151F"
-codeBackgroundColor = "#15151F"
-borderColor = "#1E1E2A"
-primaryColor = "#FF3D6E"
+showSidebarBorder = true
+chartCategoricalColors = ["#C2410C", "#166534", "#B45309", "#3F4C6B", "#7E3F5F", "#0F766E", "#8C5A2B"]
 
 [theme.light]
-primaryColor = "#E11D48"
-backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#F6F6F9"
-codeBackgroundColor = "#F6F6F9"
-textColor = "#18181B"
-linkColor = "#E11D48"
-borderColor = "#E4E4E7"
-codeTextColor = "#27272A"
-dataframeBorderColor = "#E4E4E7"
-dataframeHeaderBackgroundColor = "#F6F6F9"
-redColor = "#E11D48"
-orangeColor = "#EA580C"
-yellowColor = "#CA8A04"
-greenColor = "#059669"
-blueColor = "#2563EB"
-violetColor = "#7C3AED"
-grayColor = "#71717A"
+primaryColor = "#C2410C"
+backgroundColor = "#FDFBF7"
+secondaryBackgroundColor = "#F4EFE6"
+codeBackgroundColor = "#F4EFE6"
+textColor = "#1C1917"
+linkColor = "#9A3412"
+borderColor = "#E3DACB"
+codeTextColor = "#3F3A34"
+dataframeBorderColor = "#E3DACB"
+dataframeHeaderBackgroundColor = "#F4EFE6"
+redColor = "#B91C1C"
+orangeColor = "#C2410C"
+yellowColor = "#B45309"
+greenColor = "#166534"
+blueColor = "#3F4C6B"
+violetColor = "#7E3F5F"
+grayColor = "#78716C"
 
 [theme.light.sidebar]
-backgroundColor = "#FAFAFC"
-secondaryBackgroundColor = "#F1F1F5"
-codeBackgroundColor = "#F1F1F5"
-borderColor = "#E4E4E7"
-primaryColor = "#E11D48"
+backgroundColor = "#F4EFE6"
+secondaryBackgroundColor = "#EAE2D4"
+codeBackgroundColor = "#EAE2D4"
+borderColor = "#E3DACB"
+primaryColor = "#C2410C"
+
+[theme.dark]
+primaryColor = "#C2410C"
+backgroundColor = "#16130F"
+secondaryBackgroundColor = "#211C16"
+codeBackgroundColor = "#211C16"
+textColor = "#F0EAE0"
+linkColor = "#EFA37C"
+borderColor = "#352E25"
+codeTextColor = "#DFD7CA"
+dataframeBorderColor = "#352E25"
+dataframeHeaderBackgroundColor = "#211C16"
+redColor = "#F87171"
+orangeColor = "#EFA37C"
+yellowColor = "#E0B15E"
+greenColor = "#7BAE86"
+blueColor = "#8C9BC0"
+violetColor = "#C89BB2"
+grayColor = "#A8A29A"
+
+[theme.dark.sidebar]
+backgroundColor = "#100E0B"
+secondaryBackgroundColor = "#211C16"
+codeBackgroundColor = "#211C16"
+borderColor = "#2A241D"
+primaryColor = "#C2410C"
 
 [browser]
 gatherUsageStats = false

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from google.genai import types
 
 from gemini_client import generate_content_with_fallback
+from limits import TAGS_MAX
 
 MODEL = "gemini-flash-latest"
 
@@ -159,6 +160,11 @@ def find_output_violations(data: dict, has_transcript: bool) -> list[Violation]:
     tags = data.get("tags", [])
     if len(tags) < MIN_TAGS:
         violations.append(Violation("tags", f"only {len(tags)} tags, need at least {MIN_TAGS}"))
+    tags_chars = len(", ".join(tags))
+    if tags_chars > TAGS_MAX:
+        violations.append(
+            Violation("tags", f"combined tag length is {tags_chars} characters, YouTube's limit is {TAGS_MAX}")
+        )
 
     chapters = data.get("chapters", [])
     if not has_transcript and chapters:
@@ -177,6 +183,24 @@ def find_output_violations(data: dict, has_transcript: bool) -> list[Violation]:
             prev = secs
 
     return violations
+
+
+def enforce_tag_char_limit(tags: list[str], max_chars: int = TAGS_MAX) -> list[str]:
+    """Deterministic backstop, not best-effort: repair_output asks the model to
+    fix an oversized tag list, but nothing guarantees it complies (it didn't,
+    once, in production -- 991 characters against a 500 limit). Greedily keeps
+    tags in order until the ", "-joined length would exceed max_chars, even if
+    that drops the count below MIN_TAGS. YouTube's real cap is authoritative;
+    this app's own 35-tag minimum is a heuristic and must lose that conflict."""
+    kept: list[str] = []
+    length = 0
+    for tag in tags:
+        added = len(tag) + (2 if kept else 0)  # ", " separator before all but the first
+        if length + added > max_chars:
+            break
+        kept.append(tag)
+        length += added
+    return kept
 
 
 def repair_output(api_keys: list[str], data: dict, violations: list[Violation]) -> dict:
@@ -244,7 +268,13 @@ def generate_seo(
     if violations:
         try:
             data = repair_output(api_keys, data, violations)
+            data.setdefault("tags", [])
         except Exception:
             pass  # repair is best-effort; keep the original data if it fails
+
+    # Unconditional, not just on a detected violation: guarantees the shipped
+    # tags never exceed YouTube's real 500-character cap regardless of what
+    # the model (or its repair attempt) actually returned.
+    data["tags"] = enforce_tag_char_limit(data.get("tags", []))
 
     return data

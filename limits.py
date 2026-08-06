@@ -15,6 +15,15 @@ _SOCIAL_LINK_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+_HASHTAG_PATTERN = re.compile(r"#\w+")
+
+
+def extract_hashtags(text: str) -> list[str]:
+    """A published video has no separate hashtag field -- its hashtags live in
+    the description. Pulling them out lets the original metadata be scored on
+    the same footing as the generated metadata."""
+    return _HASHTAG_PATTERN.findall(text or "")
+
 
 @dataclass
 class LimitCheck:
