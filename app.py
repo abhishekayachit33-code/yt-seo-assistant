@@ -1,18 +1,25 @@
 import os
+from datetime import date
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
+from analytics import PROJECTION_DAYS, project_views, summarize_performance
 from comments import fetch_top_comments
-from competitors import find_competitors, tag_gap
+from competitors import audience_gap, find_competitors
+from cta import LATE_END, PRIME_END, PRIME_START, TOO_EARLY_BEFORE, analyze_ctas
 from db import ensure_schema, get_analysis, get_cached_analysis, get_connection, list_recent, save_analysis
 from export import build_csv_export, build_json_export, build_pdf_export
 from keywords import top_ngrams
-from limits import check_limits, compute_health_score
+from limits import check_limits, compute_health_score, extract_hashtags
 from llm import generate_seo
 from pacing import SILENT_GAP_THRESHOLD_SECONDS, find_silent_gaps, words_per_minute_blocks
+from playbook import build_playbook
+from revenue import estimate_revenue
 from seo_diff import diff_description, diff_tags
+from shelf_life import classify
 from thumbnail import critique_thumbnail
 from transcript import fetch_transcript_segments, segments_to_text
 from youtube import InvalidURLError, VideoNotFoundError, fetch_metadata, parse_video_id
@@ -158,7 +165,90 @@ def render_metadata(result: dict, existing_tags: list[str]) -> None:
             st.code(" ".join(hashtags), language=None, wrap_lines=True)
 
 
-def render_structure(result: dict) -> None:
+def render_cta(report) -> None:
+    with st.container(border=True):
+        st.markdown("##### :material/campaign: Call-to-action placement")
+
+        if report is None:
+            st.caption("Needs a transcript, which was not available for this video.")
+            return
+
+        if not report.mentions:
+            st.info(
+                "No call to action found anywhere in the transcript — this video never asks "
+                "viewers to subscribe, click, or sign up.",
+                icon=":material/notifications_off:",
+            )
+            st.caption(f"The prime window for a first ask is around **{report.recommended_timestamp}**.")
+            return
+
+        for mention in report.stranded:
+            st.warning(
+                f"You asked viewers to **{mention.label}** at **{mention.timestamp}** "
+                f"({mention.position:.0%} into the video), by which point most of the audience "
+                f"has already clicked away. Move your main ask to around "
+                f"**{report.recommended_timestamp}**, while they are still watching.",
+                icon=":material/warning:",
+            )
+        if report.has_well_placed:
+            st.success(
+                "At least one ask lands in the prime window, where viewers are still watching "
+                "and have seen enough to act on it.",
+                icon=":material/check_circle:",
+            )
+
+        duration = report.duration
+        zones = pd.DataFrame([
+            {"start": 0.0, "end": TOO_EARLY_BEFORE * duration, "Zone": "Too early"},
+            {"start": PRIME_START * duration, "end": PRIME_END * duration, "Zone": "Prime window"},
+            {"start": PRIME_END * duration, "end": LATE_END * duration, "Zone": "Late"},
+            {"start": LATE_END * duration, "end": duration, "Zone": "Too late"},
+        ])
+        bands = (
+            alt.Chart(zones)
+            .mark_rect(opacity=0.5)
+            .encode(
+                x=alt.X("start:Q", title="Seconds into the video"),
+                x2="end:Q",
+                color=alt.Color(
+                    "Zone:N",
+                    scale=alt.Scale(
+                        domain=["Too early", "Prime window", "Late", "Too late"],
+                        range=["#E0D6C4", "#B7D4BC", "#EBC9A6", "#E9B4A6"],
+                    ),
+                    legend=alt.Legend(orient="bottom", title=None),
+                ),
+                tooltip=["Zone:N"],
+            )
+        )
+        marks = (
+            alt.Chart(
+                pd.DataFrame([
+                    {"Seconds": m.seconds, "At": m.timestamp, "Ask": m.label, "Line": m.text[:80]}
+                    for m in report.mentions
+                ])
+            )
+            .mark_rule(size=2, color="#1C1917")
+            .encode(x="Seconds:Q", tooltip=["At:N", "Ask:N", "Line:N"])
+        )
+        st.altair_chart((bands + marks).properties(height=90), width="stretch")
+
+        st.dataframe(
+            pd.DataFrame([
+                {
+                    "At": m.timestamp,
+                    "Through": f"{m.position:.0%}",
+                    "Ask": m.label,
+                    "Placement": m.zone,
+                    "Line": m.text,
+                }
+                for m in report.mentions
+            ]),
+            hide_index=True, width="stretch",
+        )
+
+
+def render_structure(result: dict, cta_report=None, live: bool = True) -> None:
     chapters = result.get("chapters", [])
     hook = result.get("hook_analysis", {})
 
@@ -200,6 +290,123 @@ def render_structure(result: dict) -> None:
             else:
                 st.caption("Hook analysis needs a transcript, which was not available for this video.")
 
+    if live:
+        render_cta(cta_report)
+
+
+def render_reach(performance, projection, original_score: int, optimized_score: int, revenue=None) -> None:
+    with st.container(border=True):
+        st.markdown("##### :material/trending_up: Current performance")
+        with st.container(horizontal=True):
+            st.metric("Total views", f"{performance.views:,}", border=True)
+            st.metric(
+                "View velocity", f"{performance.views_per_day:,.0f}",
+                delta="per day", delta_color="off", border=True,
+            )
+            st.metric(
+                "Engagement rate", f"{performance.engagement_rate:.2f}%",
+                delta=f"{performance.likes:,} likes · {performance.comments:,} comments",
+                delta_color="off", border=True,
+                help="(likes + comments) ÷ views. Creators can hide like counts, in which case this reflects comments alone.",
+            )
+            st.metric(
+                "Age", f"{performance.days_since_upload:,}",
+                delta="days since upload", delta_color="off", border=True,
+            )
+
+    with st.container(border=True):
+        st.markdown("##### :material/rocket: Projected reach uplift")
+        st.caption(
+            "A heuristic, not a forecast: the metadata score improvement maps to an "
+            "organic-search uplift band, applied to this video's own view velocity. "
+            "Actual results depend on the algorithm, competition, and the content itself."
+        )
+        with st.container(horizontal=True):
+            st.metric(
+                "Metadata score", f"{optimized_score}%",
+                delta=f"{optimized_score - original_score:+d} pts vs. original {original_score}%",
+                border=True,
+            )
+            st.metric(
+                "Projected search uplift",
+                f"+{projection.low_uplift:.0%} – {projection.high_uplift:.0%}",
+                delta="organic search reach", delta_color="off", border=True,
+            )
+            st.metric(
+                f"Views in {PROJECTION_DAYS} days", f"{projection.low_views:,} – {projection.high_views:,}",
+                delta=f"vs. {projection.baseline_views:,} at current pace",
+                delta_color="off", border=True,
+            )
+
+        if projection.score_delta <= 0:
+            st.caption(
+                "The generated metadata did not score above the original, so no uplift is projected."
+            )
+
+    if revenue is not None:
+        with st.container(border=True):
+            st.markdown("##### :material/payments: Estimated AdSense revenue")
+            with st.container(horizontal=True):
+                st.metric(
+                    "Estimated earnings to date", f"${revenue.current:,.0f}",
+                    delta=f"{revenue.category_name} · ${revenue.rpm:.2f} RPM",
+                    delta_color="off", border=True,
+                )
+                st.metric(
+                    f"Projected gain over {PROJECTION_DAYS} days",
+                    f"+${revenue.additional_low:,.0f} – ${revenue.additional_high:,.0f}",
+                    delta="if the SEO changes are applied", delta_color="off", border=True,
+                )
+            st.caption(
+                "An order-of-magnitude estimate, not your earnings: it applies a published "
+                "average RPM for this video's category to its view count. Real RPM swings widely "
+                "with audience geography, season, video length, and ad formats — and pays nothing "
+                "at all if the channel is not in the Partner Programme."
+                + ("" if revenue.is_known_category else " This video's category is unrecognised, so a general average was used.")
+            )
+
+
+def render_shelf_life(shelf) -> None:
+    with st.container(border=True):
+        st.markdown("##### :material/hourglass: Shelf life")
+
+        score = shelf.evergreen_score
+        colour = "#166534" if score >= 55 else "#C2410C" if score <= 45 else "#B45309"
+        ring = pd.DataFrame(
+            {"part": ["Evergreen", "Trending"], "value": [score, 100 - score]}
+        )
+        gauge = (
+            alt.Chart(ring)
+            .mark_arc(innerRadius=58, outerRadius=80, cornerRadius=3)
+            .encode(
+                theta=alt.Theta("value:Q", stack=True),
+                color=alt.Color(
+                    "part:N",
+                    scale=alt.Scale(domain=["Evergreen", "Trending"], range=[colour, "#D6CFC2"]),
+                    legend=None,
+                ),
+                tooltip=["part:N", "value:Q"],
+            )
+        )
+        label = (
+            alt.Chart(pd.DataFrame({"text": [f"{score}%"]}))
+            .mark_text(size=30, fontWeight="bold", color=colour)
+            .encode(text="text:N")
+        )
+        st.altair_chart(gauge + label, width="stretch")
+
+        st.markdown(f"**Classification: {shelf.classification}**")
+        st.caption(shelf.expectation)
+
+        if not shelf.is_unclassified:
+            signal_left, signal_right = st.columns(2)
+            with signal_left:
+                st.markdown(":green-badge[Evergreen signals]")
+                chips(shelf.evergreen_hits or [], "green")
+            with signal_right:
+                st.markdown(":orange-badge[Dating signals]")
+                chips(shelf.trending_hits or [], "orange")
+
 
 def render_analysis(
     result: dict,
@@ -208,7 +415,19 @@ def render_analysis(
     transcript_text: str | None = None,
     transcript_segments=None,
     live: bool = True,
+    performance=None,
+    projection=None,
+    original_score: int = 0,
+    optimized_score: int = 0,
+    shelf=None,
+    revenue=None,
 ) -> None:
+    if live and performance is not None and projection is not None:
+        render_reach(performance, projection, original_score, optimized_score, revenue)
+
+    if shelf is not None:
+        render_shelf_life(shelf)
+
     if not live:
         st.caption(
             "Keyword density, pacing, and the SEO diff are computed from live video data, "
@@ -289,8 +508,8 @@ def render_analysis(
 def render_audience(
     result: dict,
     top_comments: list[str] | None,
-    competitors: list | None,
-    include_competitors: bool,
+    gap=None,
+    include_competitors: bool = False,
     thumbnail_url: str = "",
     live: bool = True,
 ) -> None:
@@ -352,23 +571,38 @@ def render_audience(
 
     with right:
         with st.container(border=True):
-            st.markdown("##### :material/groups: Competitors")
+            st.markdown("##### :material/swap_horiz: Audience gap")
             if not live:
                 st.caption("Re-run Analyze to compare against competitors.")
             elif not include_competitors:
                 st.caption('Enable "Compare against competitors" above and re-run to see this.')
-            elif not competitors:
+            elif gap is None:
                 st.caption("No competing videos found.")
             else:
-                gaps = tag_gap(result.get("tags", []), competitors)
-                if gaps:
-                    st.markdown("**Keyword gap** — tags competitors use that you don't")
-                    chips([f"{t} ({n})" for t, n in gaps], "orange")
+                rivals = len(gap.top_competitors)
+                if gap.gap > 0:
+                    st.markdown(
+                        f"Your top {rivals} competitors average "
+                        f"**{gap.competitor_average_views:,} views**. That is an addressable "
+                        f"gap of **~{gap.gap:,} viewers** you are not reaching."
+                    )
                 else:
-                    st.caption("No keyword gaps — your tags already cover what competitors use.")
+                    st.markdown(
+                        f"You are ahead of your top {rivals} competitors, who average "
+                        f"**{gap.competitor_average_views:,} views**."
+                    )
 
-                for c in competitors:
-                    with st.expander(c.title, icon=":material/play_circle:"):
+                if gap.missing_tags:
+                    st.markdown(
+                        f"**Add these {len(gap.missing_tags)} tags** — ranked by the views "
+                        "sitting behind them, not how often they appear."
+                    )
+                    chips([f"{t} · {v:,} views" for t, v in gap.missing_tags], "orange")
+                else:
+                    st.caption("No keyword gaps — your tags already cover what competitors rank for.")
+
+                for c in gap.top_competitors:
+                    with st.expander(f"{c.view_count:,} views · {c.title}", icon=":material/play_circle:"):
                         st.caption(c.channel_title)
                         chips(c.tags[:15] if c.tags else [], "gray")
 
@@ -408,9 +642,28 @@ def render_repurpose(result: dict) -> None:
             st.text_area("Community post", posts.get("community_post", ""), height=160, label_visibility="collapsed", key="social-community")
 
 
-def render_actions(result: dict, video_id: str, title: str) -> None:
+def render_actions(
+    result: dict, video_id: str, title: str, playbook: list | None = None, live: bool = True
+) -> None:
     with st.container(border=True):
-        st.markdown("##### :material/lightbulb: Suggestions to grow this video")
+        st.markdown("##### :material/rocket_launch: How to get more views")
+        if not live:
+            st.caption("Re-run Analyze for a fresh playbook — this needs live competitor, CTA, and thumbnail data that isn't stored with a saved analysis.")
+        elif not playbook:
+            st.success(
+                "Nothing outstanding — metadata, calls to action, and shelf-life framing all "
+                "check out. Growth from here is mostly about the content and thumbnail, "
+                "not what this tool can measure.",
+                icon=":material/check_circle:",
+            )
+        else:
+            st.caption(f"{len(playbook)} concrete change{'s' if len(playbook) != 1 else ''}, ranked by how directly it ties to view count")
+            for i, action in enumerate(playbook, 1):
+                st.markdown(f"**{i}. {action.title}**")
+                st.caption(action.detail)
+
+    with st.container(border=True):
+        st.markdown("##### :material/lightbulb: More ideas from Gemini")
         suggestions = result.get("suggestions", [])
         if not suggestions:
             st.caption("No suggestions generated.")
@@ -443,13 +696,21 @@ def render_report(
     original_description: str = "",
     existing_tags: list[str] | None = None,
     top_comments: list[str] | None = None,
-    competitors: list | None = None,
+    gap=None,
     include_competitors: bool = False,
     transcript_text: str | None = None,
     transcript_segments=None,
     thumbnail_url: str = "",
     live: bool = True,
     note: str = "",
+    performance=None,
+    projection=None,
+    original_score: int = 0,
+    optimized_score: int = 0,
+    shelf=None,
+    cta_report=None,
+    revenue=None,
+    playbook: list | None = None,
 ) -> None:
     render_hero(video_id, title, channel, result, note)
 
@@ -465,18 +726,19 @@ def render_report(
     with metadata_tab:
         render_metadata(result, existing_tags or [])
     with structure_tab:
-        render_structure(result)
+        render_structure(result, cta_report, live)
     with analysis_tab:
         render_analysis(
             result, original_description, existing_tags,
             transcript_text, transcript_segments, live,
+            performance, projection, original_score, optimized_score, shelf, revenue,
         )
     with audience_tab:
-        render_audience(result, top_comments, competitors, include_competitors, thumbnail_url, live)
+        render_audience(result, top_comments, gap, include_competitors, thumbnail_url, live)
     with repurpose_tab:
         render_repurpose(result)
     with actions_tab:
-        render_actions(result, video_id, title)
+        render_actions(result, video_id, title, playbook, live)
 
 
 # ---------------------------------------------------------------- app
@@ -492,36 +754,73 @@ if conn is not None and not ensure_schema(conn):
     if conn is not None:
         ensure_schema(conn)
 
-with st.sidebar:
-    st.markdown("### :material/movie_filter: SEO Studio")
+def render_masthead() -> None:
+    st.title("YouTube SEO Studio", text_alignment="center")
+    st.caption(
+        f"{date.today():%A, %d %B %Y}  ·  THE DESK FOR CREATORS  ·  NO. {date.today():%j}",
+        text_alignment="center",
+    )
 
-    user_name = st.text_input(
-        "Your name", key="user_name", placeholder="Your name",
-        label_visibility="collapsed",
-        help="Separates your saved history from everyone else's using this app.",
-    ).strip()
 
-    st.markdown("##### :material/history: History")
-    if conn is None:
-        st.caption("Database not connected — history unavailable this session.")
-    elif not user_name:
-        st.caption("Enter your name above to see your saved analyses.")
-    else:
-        history_search = st.text_input(
-            "Search history", key="history_search", placeholder="Search title or channel",
-            label_visibility="collapsed", icon=":material/search:",
-        ).strip()
-        recent = list_recent(conn, user_name, search=history_search)
-        if not recent:
-            st.caption("No matching analyses." if history_search else "No saved analyses yet.")
-        for row in recent:
-            label = row["title"][:38] + ("…" if len(row["title"]) > 38 else "")
-            if st.button(label, key=f"hist-{row['id']}", width="stretch"):
-                st.session_state["load_row"] = row
+# The name is the only credential: it scopes saved history so two people using
+# the same deployment never see each other's analyses. Nothing proceeds without it.
+if not st.session_state.get("user_name"):
+    render_masthead()
+    st.divider()
+    st.space("large")
+
+    _, middle, _ = st.columns([1, 1.4, 1])
+    with middle:
+        with st.container(border=True):
+            st.markdown("#### Who's writing today?")
+            st.caption("Your name keeps your saved analyses separate from everyone else's. That's all it's used for.")
+            with st.form("sign_in", border=False):
+                entered = st.text_input(
+                    "Your name", placeholder="e.g. Abhishek",
+                    label_visibility="collapsed", icon=":material/person:",
+                )
+                if st.form_submit_button("Start writing", icon=":material/arrow_forward:", type="primary", width="stretch"):
+                    if entered.strip():
+                        st.session_state["user_name"] = entered.strip()
+                        st.rerun()
+                    else:
+                        st.warning("Enter a name to continue.", icon=":material/edit:")
+    st.stop()
+
+user_name = st.session_state["user_name"]
+
+menu_col, account_col = st.columns([1, 1], vertical_alignment="center")
+
+with menu_col:
+    with st.popover(":material/menu:", help="History"):
+        st.markdown("##### :material/history: Your history")
+        if conn is None:
+            st.caption("Database not connected — history unavailable this session.")
+        else:
+            history_search = st.text_input(
+                "Search history", key="history_search", placeholder="Search title or channel",
+                label_visibility="collapsed", icon=":material/search:",
+            ).strip()
+            recent = list_recent(conn, user_name, search=history_search)
+            if not recent:
+                st.caption("No matching analyses." if history_search else "No saved analyses yet.")
+            for row in recent:
+                label = row["title"][:44] + ("…" if len(row["title"]) > 44 else "")
+                if st.button(label, key=f"hist-{row['id']}", width="stretch"):
+                    st.session_state["load_row"] = row
+                    st.rerun()
+
+with account_col:
+    with st.container(horizontal=True, horizontal_alignment="right"):
+        with st.popover(user_name, icon=":material/account_circle:"):
+            st.caption(f"Signed in as **{user_name}**")
+            if st.button("Switch name", icon=":material/logout:", width="stretch"):
+                for key in ("user_name", "load_row", "current_analysis", "thumbnail_review"):
+                    st.session_state.pop(key, None)
                 st.rerun()
 
-st.title(":material/movie_filter: YouTube SEO Studio")
-st.caption("Paste a video URL — get tags, titles, chapters, repurposed copy, and an audience read in one pass.")
+render_masthead()
+st.divider()
 
 with st.form("analyze", border=False):
     url_col, button_col = st.columns([4, 1], vertical_alignment="bottom")
@@ -542,10 +841,6 @@ if run:
 
     if not YOUTUBE_API_KEY or not GEMINI_API_KEY:
         st.error("Missing YOUTUBE_API_KEY or GEMINI_API_KEY. Add them to your .env file.", icon=":material/key_off:")
-        st.stop()
-
-    if conn is not None and not user_name:
-        st.warning("Enter your name in the sidebar first, so your history stays separate from other users'.", icon=":material/badge:")
         st.stop()
 
     if not url:
@@ -642,32 +937,111 @@ if st.session_state.get("load_row"):
 elif st.session_state.get("current_analysis"):
     data = st.session_state["current_analysis"]
     meta = data["meta"]
+    result = data["result"]
+
+    # Both sides are scored by the same rules, so the delta reflects the
+    # metadata improvement alone. A published video keeps its hashtags in the
+    # description, so they are pulled out to match the generated hashtag field.
+    original_score, _ = compute_health_score(
+        meta.title, meta.description, meta.tags, extract_hashtags(meta.description)
+    )
+    titles = result.get("titles", [])
+    optimized_score, optimized_rules = compute_health_score(
+        titles[0] if titles else meta.title,
+        result.get("description", ""),
+        result.get("tags", []),
+        result.get("hashtags", []),
+    )
+    performance = summarize_performance(
+        meta.view_count, meta.like_count, meta.comment_count, meta.published_at
+    )
+    projection = project_views(
+        meta.view_count, performance.views_per_day, optimized_score - original_score
+    )
+    # Measured against the tags the creator would actually publish -- the
+    # generated set plus what they already had -- so the gap is not inflated by
+    # tags this run is already recommending.
+    gap = audience_gap(
+        meta.view_count,
+        list(meta.tags) + result.get("tags", []),
+        data["competitors"],
+    )
+    shelf = classify(meta.title, meta.tags, data["transcript_text"])
+    cta_report = analyze_ctas(data["transcript_segments"])
+    # Revenue rides on the projected extra views, not the whole projection --
+    # the baseline views would have arrived with or without the SEO changes.
+    revenue = estimate_revenue(
+        meta.view_count,
+        meta.category_id,
+        projection.low_views - projection.baseline_views,
+        projection.high_views - projection.baseline_views,
+    )
+    playbook = build_playbook(
+        optimized_rules, gap, cta_report, shelf, st.session_state.get("thumbnail_review")
+    )
+
     render_report(
-        meta.video_id, meta.title, meta.channel_title, data["result"],
+        meta.video_id, meta.title, meta.channel_title, result,
         original_description=meta.description,
         existing_tags=meta.tags,
         top_comments=data["top_comments"],
-        competitors=data["competitors"],
+        gap=gap,
         include_competitors=data["include_competitors"],
         transcript_text=data["transcript_text"],
         transcript_segments=data["transcript_segments"],
         thumbnail_url=meta.thumbnail_url,
         live=True,
         note=data.get("note", ""),
+        performance=performance,
+        projection=projection,
+        original_score=original_score,
+        optimized_score=optimized_score,
+        shelf=shelf,
+        cta_report=cta_report,
+        revenue=revenue,
+        playbook=playbook,
     )
 
 else:
     st.space("medium")
-    cols = st.columns(3)
-    features = [
-        (":material/sell:", "Metadata", "35+ SEO tags, 5 title options, an optimized description, and hashtags."),
-        (":material/segment:", "Structure", "Chapter timestamps from real topic shifts, plus a hook verdict on your first 30 seconds."),
-        (":material/query_stats:", "Analysis", "Keyword density, speech pacing, silent gaps, and a before/after SEO diff."),
-        (":material/groups:", "Audience", "What viewers praised and complained about, competitor keyword gaps, thumbnail critique."),
-        (":material/rocket_launch:", "Repurpose", "Three short-form script concepts and ready-to-post promo copy."),
-        (":material/checklist:", "Actions", "A metadata health score, growth suggestions, and JSON/CSV/PDF export."),
+    st.markdown("## One link in. A full workup out.", text_alignment="center")
+    st.markdown(
+        "Everything below is read from the video's public data and a single model call — "
+        "no upload, no channel access, nothing to connect.",
+        text_alignment="center",
+    )
+    st.space("medium")
+
+    desks = [
+        (
+            "THE METADATA DESK",
+            [
+                ("Thirty-five tags, at minimum", "ranked for this exact video, with the ones you already use kept and marked as such."),
+                ("Five alternative titles", "each measured against the hundred-character cutoff before you ever paste it."),
+                ("A description and hashtags", "chapter timestamps folded in, closing on a call to action."),
+            ],
+        ),
+        (
+            "THE READING ROOM",
+            [
+                ("Chapters from real topic shifts", "pulled off the transcript, never evenly spaced filler."),
+                ("A verdict on your first thirty seconds", "whether the hook lands, and a rewrite if it doesn't."),
+                ("Keyword density and speech pacing", "the phrases you actually repeat, and where you race or stall."),
+            ],
+        ),
+        (
+            "THE BACK PAGE",
+            [
+                ("What the comments say", "praise and complaints separated into themes, not a star rating."),
+                ("The keyword gap", "tags your competitors agree on that you skipped entirely."),
+                ("Copy for everywhere else", "three short-form scripts, a thread, a post — and the whole report as PDF."),
+            ],
+        ),
     ]
-    for col, (icon, heading, body) in zip(cols * 2, features):
-        with col.container(border=True, height="stretch"):
-            st.markdown(f"##### {icon} {heading}")
-            st.caption(body)
+
+    for column, (desk, items) in zip(st.columns(3, gap="large"), desks):
+        with column:
+            st.markdown(f"###### {desk}")
+            st.divider()
+            for lead, body in items:
+                st.markdown(f"**{lead}** — {body}")

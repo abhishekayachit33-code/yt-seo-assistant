@@ -4,6 +4,23 @@ import json
 
 from fpdf import FPDF
 
+# Helvetica is a core PDF font limited to the latin-1 range -- Gemini output
+# routinely contains curly quotes, em dashes, and ellipses that sit outside it
+# and crash fpdf2 outright. Map the common ones to their ASCII look-alikes,
+# then fall back to '?' for anything else rather than embedding a Unicode font.
+_PDF_SAFE_SUBSTITUTIONS = {
+    "‘": "'", "’": "'", "‚": ",",
+    "“": '"', "”": '"', "„": '"',
+    "–": "-", "—": "--", "―": "--",
+    "…": "...", "•": "-", " ": " ",
+}
+
+
+def _pdf_safe(text: str) -> str:
+    for char, replacement in _PDF_SAFE_SUBSTITUTIONS.items():
+        text = text.replace(char, replacement)
+    return text.encode("latin-1", errors="replace").decode("latin-1")
+
 
 def build_json_export(meta_title: str, result: dict) -> bytes:
     return json.dumps({"title": meta_title, **result}, indent=2).encode("utf-8")
@@ -37,16 +54,16 @@ def build_pdf_export(meta_title: str, result: dict) -> bytes:
     pdf.set_font("Helvetica", "B", 16)
     pdf.multi_cell(0, 10, "YouTube SEO Report", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", "", 11)
-    pdf.multi_cell(0, 8, meta_title, new_x="LMARGIN", new_y="NEXT")
+    pdf.multi_cell(0, 8, _pdf_safe(meta_title), new_x="LMARGIN", new_y="NEXT")
     pdf.ln(4)
 
     def section(heading: str, body: str) -> None:
         if not body:
             return
         pdf.set_font("Helvetica", "B", 13)
-        pdf.multi_cell(0, 8, heading, new_x="LMARGIN", new_y="NEXT")
+        pdf.multi_cell(0, 8, _pdf_safe(heading), new_x="LMARGIN", new_y="NEXT")
         pdf.set_font("Helvetica", "", 10)
-        pdf.multi_cell(0, 6, body, new_x="LMARGIN", new_y="NEXT")
+        pdf.multi_cell(0, 6, _pdf_safe(body), new_x="LMARGIN", new_y="NEXT")
         pdf.ln(3)
 
     section("Suggested Titles", "\n".join(f"- {t}" for t in result.get("titles", [])))
