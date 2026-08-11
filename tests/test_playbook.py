@@ -1,7 +1,8 @@
 from competitors import CompetitorVideo, audience_gap
 from cta import analyze_ctas
+from keywords import estimate_spoken_length
 from limits import compute_health_score
-from playbook import build_playbook
+from playbook import NEEDS_WORK, READY, UNKNOWN, build_playbook, build_preproduction_checklist
 from shelf_life import classify
 from transcript import TranscriptSegment
 
@@ -106,3 +107,64 @@ def test_evergreen_shelf_life_produces_no_action():
     )
     actions = build_playbook(rules, shelf=shelf)
     assert not any("shelf life" in a.title.lower() for a in actions)
+
+
+def _shelf():
+    return classify("How to bake bread: a beginner tutorial", ["tutorial"], None)
+
+
+def test_checklist_all_missing_data_is_unknown_not_needs_work():
+    checklist = build_preproduction_checklist(90, {"verdict": "unavailable"}, None, None)
+    statuses = {item.label: item.status for item in checklist.items}
+    assert statuses["Hook strength"] == UNKNOWN
+    assert statuses["Estimated length"] == UNKNOWN
+    assert statuses["Shelf-life framing"] == UNKNOWN
+    assert checklist.ready_to_record  # unknown never blocks readiness
+
+
+def test_checklist_strong_hook_and_high_score_is_ready():
+    speech = estimate_spoken_length(" ".join(["word"] * 1000))
+    checklist = build_preproduction_checklist(
+        90, {"verdict": "strong, hooks immediately"}, speech, _shelf()
+    )
+    statuses = {item.label: item.status for item in checklist.items}
+    assert statuses["Hook strength"] == READY
+    assert statuses["Metadata health"] == READY
+    assert statuses["Estimated length"] == READY
+    assert checklist.ready_to_record
+
+
+def test_checklist_weak_hook_flagged_needs_work():
+    checklist = build_preproduction_checklist(90, {"verdict": "weak, doesn't hook fast enough"}, None, None)
+    hook_item = next(i for i in checklist.items if i.label == "Hook strength")
+    assert hook_item.status == NEEDS_WORK
+    assert not checklist.ready_to_record
+
+
+def test_checklist_low_health_score_flagged_needs_work():
+    checklist = build_preproduction_checklist(40, {"verdict": "unavailable"}, None, None)
+    health_item = next(i for i in checklist.items if i.label == "Metadata health")
+    assert health_item.status == NEEDS_WORK
+    assert not checklist.ready_to_record
+
+
+def test_checklist_very_short_length_flagged():
+    speech = estimate_spoken_length("one two three four five")
+    checklist = build_preproduction_checklist(90, {"verdict": "unavailable"}, speech, None)
+    length_item = next(i for i in checklist.items if i.label == "Estimated length")
+    assert length_item.status == NEEDS_WORK
+
+
+def test_checklist_very_long_length_flagged():
+    speech = estimate_spoken_length(" ".join(["word"] * 6000))  # ~43 min at 140 wpm
+    checklist = build_preproduction_checklist(90, {"verdict": "unavailable"}, speech, None)
+    length_item = next(i for i in checklist.items if i.label == "Estimated length")
+    assert length_item.status == NEEDS_WORK
+
+
+def test_checklist_shelf_life_is_informational_never_blocks():
+    trending = classify("Breaking 2026 news today", ["news"], None)
+    checklist = build_preproduction_checklist(90, {"verdict": "unavailable"}, None, trending)
+    shelf_item = next(i for i in checklist.items if i.label == "Shelf-life framing")
+    assert shelf_item.status == READY  # informational, not a blocker
+    assert checklist.ready_to_record

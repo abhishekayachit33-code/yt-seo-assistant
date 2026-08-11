@@ -104,3 +104,96 @@ def build_playbook(
         )
 
     return actions
+
+
+READY = "ready"
+NEEDS_WORK = "needs_work"
+UNKNOWN = "unknown"
+
+_WEAK_HOOK_SIGNALS = ("weak", "slow", "poor", "unclear", "fails", "doesn't hook", "does not hook")
+
+HEALTH_SCORE_READY_THRESHOLD = 80
+SHORT_LENGTH_MINUTES = 2
+LONG_LENGTH_MINUTES = 30
+
+
+@dataclass
+class ChecklistItem:
+    label: str
+    status: str  # "ready" | "needs_work" | "unknown"
+    detail: str
+
+
+@dataclass
+class PreproductionChecklist:
+    items: list[ChecklistItem]
+
+    @property
+    def ready_to_record(self) -> bool:
+        return all(i.status != NEEDS_WORK for i in self.items)
+
+
+def build_preproduction_checklist(
+    health_score: int,
+    hook_analysis: dict,
+    speech_estimate=None,
+    shelf=None,
+) -> PreproductionChecklist:
+    """Pure recombination of signals this app has already computed elsewhere
+    -- same no-I/O shape as build_playbook -- into a single go/no-go read
+    before recording. Each item degrades to 'unknown' rather than a false
+    'needs_work' when the underlying data (a pasted script, a hook verdict)
+    simply wasn't provided; missing data is not the same as a problem."""
+    items = []
+
+    verdict = (hook_analysis or {}).get("verdict", "")
+    if not verdict or verdict == "unavailable":
+        items.append(ChecklistItem(
+            "Hook strength", UNKNOWN,
+            "No script was pasted, so the opening couldn't be judged.",
+        ))
+    elif any(signal in verdict.lower() for signal in _WEAK_HOOK_SIGNALS):
+        items.append(ChecklistItem(
+            "Hook strength", NEEDS_WORK,
+            f"Verdict: {verdict}. Tighten the first ~30 seconds before recording.",
+        ))
+    else:
+        items.append(ChecklistItem("Hook strength", READY, f"Verdict: {verdict}."))
+
+    if health_score >= HEALTH_SCORE_READY_THRESHOLD:
+        items.append(ChecklistItem(
+            "Metadata health", READY, f"{health_score}% -- above the {HEALTH_SCORE_READY_THRESHOLD}% bar.",
+        ))
+    else:
+        items.append(ChecklistItem(
+            "Metadata health", NEEDS_WORK,
+            f"{health_score}% -- check the compliance checklist before publishing.",
+        ))
+
+    if speech_estimate is None:
+        items.append(ChecklistItem(
+            "Estimated length", UNKNOWN, "No script was pasted, so length couldn't be estimated.",
+        ))
+    elif speech_estimate.high_minutes < SHORT_LENGTH_MINUTES:
+        items.append(ChecklistItem(
+            "Estimated length", NEEDS_WORK,
+            f"{speech_estimate.label} -- unusually short for long-form; confirm this is intentional (e.g. a Short).",
+        ))
+    elif speech_estimate.low_minutes > LONG_LENGTH_MINUTES:
+        items.append(ChecklistItem(
+            "Estimated length", NEEDS_WORK,
+            f"{speech_estimate.label} -- long enough that retention may suffer without a strong structure.",
+        ))
+    else:
+        items.append(ChecklistItem("Estimated length", READY, speech_estimate.label))
+
+    if shelf is None:
+        items.append(ChecklistItem("Shelf-life framing", UNKNOWN, "Not enough signal to classify."))
+    else:
+        # Informational only, never a blocker -- a Trending classification is
+        # a fact to plan distribution around, not a defect to fix.
+        items.append(ChecklistItem(
+            "Shelf-life framing", READY, f"{shelf.classification}: {shelf.expectation}",
+        ))
+
+    return PreproductionChecklist(items=items)
