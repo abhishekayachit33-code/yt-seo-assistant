@@ -1,5 +1,8 @@
+import json
+from unittest.mock import MagicMock, patch
+
 from limits import TAGS_MAX
-from llm import MIN_TAGS, enforce_tag_char_limit, find_output_violations
+from llm import MIN_TAGS, enforce_tag_char_limit, find_output_violations, generate_seo
 
 
 def _data(tags=None, chapters=None):
@@ -98,3 +101,70 @@ def test_enforce_tag_char_limit_accounts_for_separators():
     trimmed = enforce_tag_char_limit(tags, max_chars=500)
     assert len(", ".join(trimmed)) <= 500
     assert len(trimmed) == 9
+
+
+def _full_response(chapters=None):
+    payload = {
+        "tags": [f"tag{i}" for i in range(MIN_TAGS)],
+        "chapters": chapters if chapters is not None else [],
+        "suggestions": ["do a thing"],
+        "titles": ["A title"],
+        "description": "A description",
+        "hashtags": ["#a", "#b"],
+        "hook_analysis": {"verdict": "strong", "reasoning": "r", "rewrite": ""},
+        "comment_sentiment": {"positive_themes": [], "negative_themes": [], "summary": ""},
+        "shorts_scripts": [],
+        "social_posts": {"twitter_thread": "", "linkedin_post": "", "community_post": ""},
+    }
+    response = MagicMock()
+    response.text = json.dumps(payload)
+    return response
+
+
+@patch("llm.generate_content_with_fallback")
+def test_suppress_chapters_forces_empty_list_even_if_model_returns_some(mock_generate):
+    # The model "misbehaving" and returning chapters anyway is exactly the
+    # scenario the deterministic backstop exists for -- repair_output() runs
+    # against the base SYSTEM_PROMPT and could reintroduce them.
+    mock_generate.return_value = _full_response(
+        chapters=[{"timestamp": "00:00", "title": "Fabricated"}]
+    )
+    data = generate_seo(
+        api_keys=["k"], title="t", description="d", existing_tags=[],
+        transcript="a pasted script", suppress_chapters=True,
+    )
+    assert data["chapters"] == []
+
+
+@patch("llm.generate_content_with_fallback")
+def test_chapters_kept_when_not_suppressed(mock_generate):
+    mock_generate.return_value = _full_response(
+        chapters=[{"timestamp": "00:00", "title": "Intro"}, {"timestamp": "00:20", "title": "Main"}]
+    )
+    data = generate_seo(
+        api_keys=["k"], title="t", description="d", existing_tags=[],
+        transcript="a real transcript", suppress_chapters=False,
+    )
+    assert len(data["chapters"]) == 2
+
+
+@patch("llm.generate_content_with_fallback")
+def test_suppress_chapters_adds_override_to_system_prompt(mock_generate):
+    mock_generate.return_value = _full_response()
+    generate_seo(
+        api_keys=["k"], title="t", description="d", existing_tags=[],
+        transcript=None, suppress_chapters=True,
+    )
+    system_instruction = mock_generate.call_args.kwargs["config"].system_instruction
+    assert "has not been recorded or uploaded yet" in system_instruction
+
+
+@patch("llm.generate_content_with_fallback")
+def test_no_suppress_chapters_leaves_system_prompt_unchanged(mock_generate):
+    mock_generate.return_value = _full_response()
+    generate_seo(
+        api_keys=["k"], title="t", description="d", existing_tags=[],
+        transcript=None, suppress_chapters=False,
+    )
+    system_instruction = mock_generate.call_args.kwargs["config"].system_instruction
+    assert "has not been recorded or uploaded yet" not in system_instruction
