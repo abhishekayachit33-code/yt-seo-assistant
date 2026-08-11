@@ -12,15 +12,16 @@ from competitors import audience_gap, find_competitors
 from cta import LATE_END, PRIME_END, PRIME_START, TOO_EARLY_BEFORE, analyze_ctas
 from db import ensure_schema, get_analysis, get_cached_analysis, get_connection, list_recent, save_analysis
 from export import build_csv_export, build_json_export, build_pdf_export
-from keywords import top_ngrams
+from keywords import estimate_spoken_length, top_ngrams
 from limits import check_limits, compute_health_score, extract_hashtags
 from llm import generate_seo
 from pacing import SILENT_GAP_THRESHOLD_SECONDS, find_silent_gaps, words_per_minute_blocks
-from playbook import build_playbook
+from playbook import build_playbook, build_preproduction_checklist
+from readability import scan_readability
 from revenue import estimate_revenue
 from seo_diff import diff_description, diff_tags
 from shelf_life import classify
-from thumbnail import critique_thumbnail
+from thumbnail import critique_thumbnail, critique_thumbnail_bytes
 from transcript import fetch_transcript_segments, segments_to_text
 from youtube import InvalidURLError, VideoNotFoundError, build_planned_meta, fetch_metadata, parse_video_id
 
@@ -113,6 +114,28 @@ def render_hero(video_id: str, title: str, channel: str, result: dict, note: str
 
 
 # ---------------------------------------------------------------- sections
+
+
+def render_variant_comparison(variants: list) -> None:
+    with st.container(border=True):
+        st.markdown("##### :material/compare_arrows: Title variants")
+        st.caption("Each variant ran its own full analysis — its own generated tags, description, and hashtags.")
+        columns = st.columns(len(variants))
+        for column, (variant_title, variant_result) in zip(columns, variants):
+            score, rules = compute_health_score(
+                variant_title, variant_result.get("description", ""),
+                variant_result.get("tags", []), variant_result.get("hashtags", []),
+            )
+            score_color = "green" if score >= 80 else "orange" if score >= 55 else "red"
+            with column:
+                with st.container(border=True, height="stretch"):
+                    st.markdown(f"**{variant_title}**")
+                    st.markdown(f":{score_color}-badge[:material/health_metrics: Health {score}%]")
+                    st.caption(f"{len(variant_result.get('tags', []))} tags generated")
+                    for r in rules:
+                        icon = ":material/check_circle:" if r.passed else ":material/cancel:"
+                        color = "green" if r.passed else "red"
+                        st.markdown(f":{color}[{icon}] {r.label}")
 
 
 def render_metadata(result: dict, existing_tags: list[str]) -> None:
@@ -254,7 +277,7 @@ def render_cta(report) -> None:
         )
 
 
-def render_structure(result: dict, cta_report=None, live: bool = True) -> None:
+def render_structure(result: dict, cta_report=None, live: bool = True, speech_estimate=None) -> None:
     chapters = result.get("chapters", [])
     hook = result.get("hook_analysis", {})
 
@@ -295,6 +318,8 @@ def render_structure(result: dict, cta_report=None, live: bool = True) -> None:
                     st.info(hook["rewrite"], icon=":material/auto_fix_high:")
             else:
                 st.caption("Hook analysis needs a transcript, which was not available for this video.")
+            if speech_estimate is not None:
+                st.caption(f":material/schedule: {speech_estimate.label}")
 
     if live:
         render_cta(cta_report)
@@ -423,6 +448,7 @@ def render_analysis(
     optimized_score: int = 0,
     shelf=None,
     revenue=None,
+    readability=None,
 ) -> None:
     if live and performance is not None and projection is not None:
         render_reach(performance, projection, original_score, optimized_score, revenue)
@@ -508,6 +534,24 @@ def render_analysis(
                             for g in gaps[:15]:
                                 st.markdown(f"- **{g.start:.0f}s → {g.end:.0f}s** ({g.duration:.1f}s)")
 
+        render_readability(readability)
+
+
+def render_readability(report) -> None:
+    with st.container(border=True):
+        st.markdown("##### :material/spellcheck: Script readability")
+        if report is None:
+            st.caption("Needs a transcript or script, which was not available.")
+            return
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Filler words", report.total_filler_count, delta=f"{report.filler_rate}/100 words", delta_color="off", border=True)
+        m2.metric("Avg. sentence length", f"{report.avg_sentence_length} words", border=True)
+        m3.metric("Word count", f"{report.word_count:,}", border=True)
+        if report.filler_hits:
+            chips([f"{h.word} × {h.count}" for h in report.filler_hits], "orange")
+        else:
+            st.caption("No common filler words detected.")
+
 
 def render_audience(
     result: dict,
@@ -516,6 +560,7 @@ def render_audience(
     include_competitors: bool = False,
     thumbnail_url: str = "",
     live: bool = True,
+    uploaded_thumbnail: dict | None = None,
 ) -> None:
     sentiment = result.get("comment_sentiment", {})
 
@@ -549,16 +594,25 @@ def render_audience(
             st.markdown("##### :material/image_search: Thumbnail critique")
             if not live:
                 st.caption("Re-run Analyze to critique the thumbnail.")
-            elif not thumbnail_url:
+            elif not thumbnail_url and not uploaded_thumbnail:
                 st.caption("No thumbnail yet — critique becomes available once you've uploaded one.")
             else:
-                st.image(thumbnail_url, width=320)
+                if thumbnail_url:
+                    st.image(thumbnail_url, width=320)
+                else:
+                    st.image(uploaded_thumbnail["bytes"], width=320)
                 review = st.session_state.get("thumbnail_review")
                 if review is None:
                     st.caption("Costs one Gemini vision call — runs only when you ask for it.")
                     if st.button("Run thumbnail vision critique", icon=":material/visibility:", type="primary"):
                         with st.spinner("Analyzing thumbnail..."):
-                            st.session_state["thumbnail_review"] = critique_thumbnail(GEMINI_API_KEYS, thumbnail_url) or {}
+                            if thumbnail_url:
+                                critique = critique_thumbnail(GEMINI_API_KEYS, thumbnail_url)
+                            else:
+                                critique = critique_thumbnail_bytes(
+                                    GEMINI_API_KEYS, uploaded_thumbnail["bytes"], uploaded_thumbnail["mime_type"]
+                                )
+                            st.session_state["thumbnail_review"] = critique or {}
                         st.rerun()
                 elif not review:
                     st.caption("Thumbnail review unavailable for this video.")
@@ -647,9 +701,28 @@ def render_repurpose(result: dict) -> None:
             st.text_area("Community post", posts.get("community_post", ""), height=160, label_visibility="collapsed", key="social-community")
 
 
+def render_preproduction_checklist(checklist) -> None:
+    with st.container(border=True):
+        st.markdown("##### :material/checklist: Ready to record?")
+        if checklist.ready_to_record:
+            st.success("Nothing flagged — this looks ready to record.", icon=":material/check_circle:")
+        else:
+            st.warning("A few things worth fixing before you hit record.", icon=":material/warning:")
+        for item in checklist.items:
+            icon = {
+                "ready": ":material/check_circle:", "needs_work": ":material/cancel:",
+            }.get(item.status, ":material/help:")
+            color = {"ready": "green", "needs_work": "red"}.get(item.status, "gray")
+            st.markdown(f":{color}[{icon}] **{item.label}** — {item.detail}")
+
+
 def render_actions(
-    result: dict, video_id: str, title: str, playbook: list | None = None, live: bool = True
+    result: dict, video_id: str, title: str, playbook: list | None = None, live: bool = True,
+    checklist=None,
 ) -> None:
+    if checklist is not None:
+        render_preproduction_checklist(checklist)
+
     with st.container(border=True):
         st.markdown("##### :material/rocket_launch: How to get more views")
         if not live:
@@ -717,6 +790,11 @@ def render_report(
     revenue=None,
     playbook: list | None = None,
     planning: bool = False,
+    uploaded_thumbnail: dict | None = None,
+    speech_estimate=None,
+    readability=None,
+    variants: list | None = None,
+    checklist=None,
 ) -> None:
     render_hero(video_id, title, channel, result, note, planning)
 
@@ -730,21 +808,23 @@ def render_report(
     ])
 
     with metadata_tab:
+        if planning and variants and len(variants) > 1:
+            render_variant_comparison(variants)
         render_metadata(result, existing_tags or [])
     with structure_tab:
-        render_structure(result, cta_report, live)
+        render_structure(result, cta_report, live, speech_estimate)
     with analysis_tab:
         render_analysis(
             result, original_description, existing_tags,
             transcript_text, transcript_segments, live,
-            performance, projection, original_score, optimized_score, shelf, revenue,
+            performance, projection, original_score, optimized_score, shelf, revenue, readability,
         )
     with audience_tab:
-        render_audience(result, top_comments, gap, include_competitors, thumbnail_url, live)
+        render_audience(result, top_comments, gap, include_competitors, thumbnail_url, live, uploaded_thumbnail)
     with repurpose_tab:
         render_repurpose(result)
     with actions_tab:
-        render_actions(result, video_id, title, playbook, live)
+        render_actions(result, video_id, title, playbook, live, checklist)
 
 
 # ---------------------------------------------------------------- app
@@ -856,6 +936,15 @@ if mode == "Plan a new video":
             height=160,
             help="Used for hook analysis and keyword density. Chapters are never generated here, since there's no real video duration to base timestamps on.",
         )
+        plan_title_variants = st.text_area(
+            "Additional title variants (optional, up to 2, one per line)",
+            placeholder="Alternate title 1\nAlternate title 2",
+            height=70,
+            help="Each variant runs its own full Gemini analysis to compare — up to 2x-3x the usual request cost.",
+        )
+        plan_thumbnail = st.file_uploader(
+            "Thumbnail concept (optional)", type=["png", "jpg", "jpeg", "webp"],
+        )
         run_plan = st.form_submit_button(
             "Plan this video", icon=":material/auto_awesome:", type="primary", width="stretch",
         )
@@ -929,13 +1018,40 @@ if run_plan:
             except Exception:
                 pass  # history is best-effort, never block the page over it
 
+        # Each variant is a full, independent generate_seo() call (own tags,
+        # description, hook) -- not a free structural comparison -- capped at
+        # 2 so one planning session can't burn more than 3x the usual request
+        # cost. The primary result above stays the one driving every other
+        # tab; variants exist only for the comparison view.
+        variant_titles = [t.strip() for t in plan_title_variants.splitlines() if t.strip()][:2]
+        variants = [(meta.title, result)]
+        for variant_title in variant_titles:
+            st.write(f":material/auto_awesome: Generating variant: {variant_title}")
+            try:
+                variant_result = generate_seo(
+                    api_keys=GEMINI_API_KEYS,
+                    title=variant_title,
+                    description=meta.description,
+                    existing_tags=meta.tags,
+                    transcript=plan_script.strip() or None,
+                    comments=[],
+                    suppress_chapters=True,
+                )
+            except Exception:
+                continue  # one variant failing is not worth aborting the whole plan
+            variants.append((variant_title, variant_result))
+
         status.update(label="Plan complete", state="complete", expanded=False)
 
     st.session_state["current_analysis"] = {
         "meta": meta, "result": result, "top_comments": [],
         "competitors": competitors, "include_competitors": include_competitors,
         "transcript_segments": None, "transcript_text": plan_script.strip() or None,
-        "note": "", "planning": True,
+        "note": "", "planning": True, "variants": variants,
+        "thumbnail_upload": (
+            {"bytes": plan_thumbnail.getvalue(), "mime_type": plan_thumbnail.type}
+            if plan_thumbnail is not None else None
+        ),
     }
     st.session_state.pop("thumbnail_review", None)
 
@@ -1067,6 +1183,8 @@ elif st.session_state.get("current_analysis"):
     )
     shelf = classify(meta.title, meta.tags, data["transcript_text"])
     cta_report = analyze_ctas(data["transcript_segments"])
+    speech_estimate = estimate_spoken_length(data["transcript_text"])
+    readability = scan_readability(data["transcript_text"])
 
     # A planned video has no real views, publish date, or category yet -- a
     # projection or revenue estimate off all-zero inputs would be a meaningless
@@ -1091,6 +1209,14 @@ elif st.session_state.get("current_analysis"):
     playbook = build_playbook(
         optimized_rules, gap, cta_report, shelf, st.session_state.get("thumbnail_review")
     )
+    # A pre-record readiness check only makes sense before there's anything to
+    # measure -- once real performance data exists (a live, already-uploaded
+    # video), the growth playbook above already covers "what to fix."
+    checklist = None
+    if planning:
+        checklist = build_preproduction_checklist(
+            optimized_score, result.get("hook_analysis", {}), speech_estimate, shelf
+        )
 
     render_report(
         meta.video_id, meta.title, meta.channel_title, result,
@@ -1113,6 +1239,11 @@ elif st.session_state.get("current_analysis"):
         revenue=revenue,
         playbook=playbook,
         planning=planning,
+        uploaded_thumbnail=data.get("thumbnail_upload"),
+        speech_estimate=speech_estimate,
+        readability=readability,
+        variants=data.get("variants"),
+        checklist=checklist,
     )
 
 else:
