@@ -168,3 +168,31 @@ def test_no_suppress_chapters_leaves_system_prompt_unchanged(mock_generate):
     )
     system_instruction = mock_generate.call_args.kwargs["config"].system_instruction
     assert "has not been recorded or uploaded yet" not in system_instruction
+
+
+@patch("llm.generate_content_with_fallback")
+def test_missing_rationale_fields_default_to_empty_string(mock_generate):
+    # _full_response() omits titles_rationale/tags_rationale entirely -- older
+    # cached results and any model response that skips them must not crash.
+    mock_generate.return_value = _full_response()
+    data = generate_seo(
+        api_keys=["k"], title="t", description="d", existing_tags=[], transcript=None,
+    )
+    assert data["titles_rationale"] == ""
+    assert data["tags_rationale"] == ""
+
+
+@patch("llm.generate_content_with_fallback")
+def test_rationale_fields_pass_through_when_provided(mock_generate):
+    response = _full_response()
+    payload = json.loads(response.text)
+    payload["titles_rationale"] = "Leads with a number for curiosity."
+    payload["tags_rationale"] = "Prioritizes long-tail phrases from the transcript."
+    response.text = json.dumps(payload)
+    mock_generate.return_value = response
+
+    data = generate_seo(
+        api_keys=["k"], title="t", description="d", existing_tags=[], transcript=None,
+    )
+    assert data["titles_rationale"] == "Leads with a number for curiosity."
+    assert data["tags_rationale"] == "Prioritizes long-tail phrases from the transcript."
