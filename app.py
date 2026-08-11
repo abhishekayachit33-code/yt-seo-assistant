@@ -154,6 +154,8 @@ def render_metadata(result: dict, existing_tags: list[str]) -> None:
                     over = len(t) > 100
                     st.markdown(f"**{i}.** {t}")
                     st.caption(f":{'red' if over else 'gray'}[{len(t)}/100 characters]")
+                if result.get("titles_rationale"):
+                    st.info(result["titles_rationale"], icon=":material/lightbulb:")
             else:
                 st.caption("No title suggestions generated.")
 
@@ -186,6 +188,8 @@ def render_metadata(result: dict, existing_tags: list[str]) -> None:
 
             st.caption("Copy for the tags field")
             st.code(joined, language=None, wrap_lines=True)
+            if result.get("tags_rationale"):
+                st.info(result["tags_rationale"], icon=":material/lightbulb:")
 
         with st.container(border=True):
             st.markdown("##### :material/tag: Hashtags")
@@ -685,6 +689,8 @@ def render_repurpose(result: dict) -> None:
                         label_visibility="collapsed", key=f"shorts-script-{i}",
                     )
                     st.caption(s.get("caption", ""))
+                    if s.get("rationale"):
+                        st.caption(f":material/lightbulb: {s['rationale']}")
 
     with st.container(border=True):
         st.markdown("##### :material/share: Promo copy")

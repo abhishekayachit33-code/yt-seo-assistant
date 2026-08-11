@@ -25,6 +25,12 @@ Output Constraints:
 - social_posts: Draft promotional copy optimized for platform algorithms: a Twitter/X thread (3-5 tweets), a professional LinkedIn post, and an engaging YouTube Community poll/post.
 
 For every single generation (titles, tags, scripts), you MUST include a brief 'rationale' explaining exactly why this change will increase CTR, search ranking, or retention based on the provided context.
+
+Schema note on where each rationale goes: titles and tags are flat lists (no
+per-item field), so summarize the overall strategy behind them in
+'titles_rationale' and 'tags_rationale' respectively. Each shorts_scripts
+entry has its own 'rationale' field -- explain that specific repurposing
+choice there.
 """
 
 SEO_SCHEMA = {
@@ -44,6 +50,8 @@ SEO_SCHEMA = {
         },
         "suggestions": {"type": "array", "items": {"type": "string"}},
         "titles": {"type": "array", "items": {"type": "string"}},
+        "titles_rationale": {"type": "string"},
+        "tags_rationale": {"type": "string"},
         "description": {"type": "string"},
         "hashtags": {"type": "array", "items": {"type": "string"}},
         "hook_analysis": {
@@ -72,8 +80,9 @@ SEO_SCHEMA = {
                     "hook_line": {"type": "string"},
                     "script": {"type": "string"},
                     "caption": {"type": "string"},
+                    "rationale": {"type": "string"},
                 },
-                "required": ["hook_line", "script", "caption"],
+                "required": ["hook_line", "script", "caption", "rationale"],
             },
         },
         "social_posts": {
@@ -249,7 +258,8 @@ def generate_seo(
 
     for key, default in (
         ("tags", []), ("chapters", []), ("suggestions", []),
-        ("titles", []), ("description", ""), ("hashtags", []),
+        ("titles", []), ("titles_rationale", ""), ("tags_rationale", ""),
+        ("description", ""), ("hashtags", []),
         ("hook_analysis", {"verdict": "", "reasoning": "", "rewrite": ""}),
         ("comment_sentiment", {"positive_themes": [], "negative_themes": [], "summary": ""}),
         ("shorts_scripts", []),
