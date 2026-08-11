@@ -1,4 +1,5 @@
 import re
+import uuid
 from dataclasses import dataclass
 
 import requests
@@ -29,6 +30,30 @@ class VideoMeta:
     like_count: int = 0
     comment_count: int = 0
     category_id: str = ""
+    is_planned: bool = False
+
+
+def build_planned_meta(title: str, description: str, tags: list[str], channel_title: str) -> VideoMeta:
+    """Synthetic VideoMeta for a video that doesn't exist on YouTube yet -- lets
+    the rest of the app (health score, SEO diff, competitor gap, exports,
+    history) work unmodified on a draft. video_id is 'planned-<12 hex chars>'
+    (20 chars), which can never collide with a real 11-char YouTube ID, so it
+    doubles as the "was this planned" signal anywhere a video_id string is
+    available -- including on reload from history, with no DB migration."""
+    return VideoMeta(
+        video_id=f"planned-{uuid.uuid4().hex[:12]}",
+        title=title,
+        description=description,
+        tags=tags,
+        channel_title=channel_title,
+        thumbnail_url="",
+        published_at="",
+        view_count=0,
+        like_count=0,
+        comment_count=0,
+        category_id="",
+        is_planned=True,
+    )
 
 
 def parse_video_id(url: str) -> str:

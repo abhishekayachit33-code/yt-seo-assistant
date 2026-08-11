@@ -227,6 +227,13 @@ def repair_output(api_keys: list[str], data: dict, violations: list[Violation]) 
     return json.loads(response.text)
 
 
+_PLANNING_CHAPTER_OVERRIDE = (
+    "\nThis video has not been recorded or uploaded yet -- always return an "
+    "empty chapters list regardless of whether transcript text was provided, "
+    "since there is no real duration to base timestamps on."
+)
+
+
 def generate_seo(
     api_keys: list[str],
     title: str,
@@ -234,15 +241,17 @@ def generate_seo(
     existing_tags: list[str],
     transcript: str | None,
     comments: list[str] | None = None,
+    suppress_chapters: bool = False,
 ) -> dict:
     user_prompt = _build_user_prompt(title, description, existing_tags, transcript, comments)
+    system_prompt = SYSTEM_PROMPT + _PLANNING_CHAPTER_OVERRIDE if suppress_chapters else SYSTEM_PROMPT
 
     response = generate_content_with_fallback(
         api_keys,
         model=MODEL,
         contents=user_prompt,
         config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
+            system_instruction=system_prompt,
             response_mime_type="application/json",
             response_schema=SEO_SCHEMA,
             temperature=0.4,
@@ -264,6 +273,13 @@ def generate_seo(
     ):
         data.setdefault(key, default)
 
+    if suppress_chapters:
+        # Cleared before violation-checking too, not just at the end: an empty
+        # chapters list can't trip find_output_violations' chapter rules, so
+        # this avoids a wasted repair round-trip over something about to be
+        # discarded anyway.
+        data["chapters"] = []
+
     violations = find_output_violations(data, has_transcript=bool(transcript))
     if violations:
         try:
@@ -276,5 +292,12 @@ def generate_seo(
     # tags never exceed YouTube's real 500-character cap regardless of what
     # the model (or its repair attempt) actually returned.
     data["tags"] = enforce_tag_char_limit(data.get("tags", []))
+
+    if suppress_chapters:
+        # Same belt-and-suspenders pattern as the tag limit above: the prompt
+        # override asks the model to omit chapters, but repair_output() runs
+        # against the base SYSTEM_PROMPT and could reintroduce them, so this
+        # is enforced unconditionally rather than trusted to the model.
+        data["chapters"] = []
 
     return data

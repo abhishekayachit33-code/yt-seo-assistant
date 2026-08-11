@@ -22,7 +22,7 @@ from seo_diff import diff_description, diff_tags
 from shelf_life import classify
 from thumbnail import critique_thumbnail
 from transcript import fetch_transcript_segments, segments_to_text
-from youtube import InvalidURLError, VideoNotFoundError, fetch_metadata, parse_video_id
+from youtube import InvalidURLError, VideoNotFoundError, build_planned_meta, fetch_metadata, parse_video_id
 
 load_dotenv()
 
@@ -61,49 +61,55 @@ def chips(items: list[str], color: str = "violet") -> None:
 # ---------------------------------------------------------------- header
 
 
-def render_hero(video_id: str, title: str, channel: str, result: dict, note: str = "") -> None:
+def render_hero(video_id: str, title: str, channel: str, result: dict, note: str = "", planning: bool = False) -> None:
     score, rules = compute_health_score(
         title, result.get("description", ""), result.get("tags", []), result.get("hashtags", [])
     )
     passed = sum(r.passed for r in rules)
 
     with st.container(border=True):
-        art, info = st.columns([1, 3], vertical_alignment="center")
-        art.image(thumbnail_for(video_id), width="stretch")
+        if planning:
+            info = st.container()
+        else:
+            art, info = st.columns([1, 3], vertical_alignment="center")
+            art.image(thumbnail_for(video_id), width="stretch")
         with info:
             st.markdown(f"### {title}")
-            st.caption(f":material/account_circle: {channel}" if channel else "")
+            st.caption(":material/edit_note: Planned video — not yet uploaded" if planning else (f":material/account_circle: {channel}" if channel else ""))
             score_color = "green" if score >= 80 else "orange" if score >= 55 else "red"
-            st.markdown(
+            badges = (
                 f":{score_color}-badge[:material/health_metrics: Health {score}%] "
                 f":violet-badge[:material/sell: {len(result.get('tags', []))} tags] "
-                f":blue-badge[:material/tag: {len(result.get('hashtags', []))} hashtags] "
-                f":gray-badge[:material/segment: {len(result.get('chapters', []))} chapters]"
+                f":blue-badge[:material/tag: {len(result.get('hashtags', []))} hashtags]"
             )
+            if not planning:
+                badges += f" :gray-badge[:material/segment: {len(result.get('chapters', []))} chapters]"
+            st.markdown(badges)
             if note:
                 st.caption(note)
 
-    with st.container(horizontal=True):
-        st.metric(
-            "Metadata health", f"{score}%", delta=f"{passed}/{len(rules)} checks",
-            delta_color="off", border=True,
-            help="Compliance against YouTube best practices, not just hard limits.",
+    hard_limits = check_limits(
+        title, result.get("description", ""), result.get("tags", []), result.get("hashtags", [])
+    )
+    failing = [c for c in hard_limits if not c.ok]
+    if failing:
+        st.warning(
+            "Over YouTube's hard limit: " + ", ".join(f"{c.label} ({c.current:,}/{c.maximum:,})" for c in failing)
+            + " — trim before publishing.",
+            icon=":material/warning:",
         )
-        for check in check_limits(
-            title, result.get("description", ""), result.get("tags", []), result.get("hashtags", [])
-        ):
-            st.metric(
-                check.label, f"{check.current:,}",
-                delta=f"limit {check.maximum:,}",
-                delta_color="off" if check.ok else "inverse",
-                border=True,
-            )
 
-    with st.expander("Compliance checklist", icon=":material/checklist:"):
+    with st.expander(f"Metadata health: {score}% ({passed}/{len(rules)} checks)", icon=":material/checklist:"):
+        st.caption("Compliance against YouTube best practices and hard limits, not a guess.")
         for r in rules:
             icon = ":material/check_circle:" if r.passed else ":material/cancel:"
             color = "green" if r.passed else "red"
             st.markdown(f":{color}[{icon}] **{r.label}** — {r.detail}")
+        st.divider()
+        for c in hard_limits:
+            icon = ":material/check_circle:" if c.ok else ":material/cancel:"
+            color = "green" if c.ok else "red"
+            st.markdown(f":{color}[{icon}] **{c.label}** — {c.current:,} / {c.maximum:,} limit")
 
 
 # ---------------------------------------------------------------- sections
@@ -296,30 +302,10 @@ def render_structure(result: dict, cta_report=None, live: bool = True) -> None:
 
 def render_reach(performance, projection, original_score: int, optimized_score: int, revenue=None) -> None:
     with st.container(border=True):
-        st.markdown("##### :material/trending_up: Current performance")
-        with st.container(horizontal=True):
-            st.metric("Total views", f"{performance.views:,}", border=True)
-            st.metric(
-                "View velocity", f"{performance.views_per_day:,.0f}",
-                delta="per day", delta_color="off", border=True,
-            )
-            st.metric(
-                "Engagement rate", f"{performance.engagement_rate:.2f}%",
-                delta=f"{performance.likes:,} likes · {performance.comments:,} comments",
-                delta_color="off", border=True,
-                help="(likes + comments) ÷ views. Creators can hide like counts, in which case this reflects comments alone.",
-            )
-            st.metric(
-                "Age", f"{performance.days_since_upload:,}",
-                delta="days since upload", delta_color="off", border=True,
-            )
-
-    with st.container(border=True):
         st.markdown("##### :material/rocket: Projected reach uplift")
         st.caption(
             "A heuristic, not a forecast: the metadata score improvement maps to an "
-            "organic-search uplift band, applied to this video's own view velocity. "
-            "Actual results depend on the algorithm, competition, and the content itself."
+            "organic-search uplift band, applied to this video's own view velocity."
         )
         with st.container(horizontal=True):
             st.metric(
@@ -343,27 +329,43 @@ def render_reach(performance, projection, original_score: int, optimized_score: 
                 "The generated metadata did not score above the original, so no uplift is projected."
             )
 
-    if revenue is not None:
-        with st.container(border=True):
-            st.markdown("##### :material/payments: Estimated AdSense revenue")
+        with st.expander("Current performance and revenue estimate", icon=":material/monitoring:"):
             with st.container(horizontal=True):
+                st.metric("Total views", f"{performance.views:,}", border=True)
                 st.metric(
-                    "Estimated earnings to date", f"${revenue.current:,.0f}",
-                    delta=f"{revenue.category_name} · ${revenue.rpm:.2f} RPM",
+                    "View velocity", f"{performance.views_per_day:,.0f}",
+                    delta="per day", delta_color="off", border=True,
+                )
+                st.metric(
+                    "Engagement rate", f"{performance.engagement_rate:.2f}%",
+                    delta=f"{performance.likes:,} likes · {performance.comments:,} comments",
                     delta_color="off", border=True,
+                    help="(likes + comments) ÷ views. Creators can hide like counts, in which case this reflects comments alone.",
                 )
                 st.metric(
-                    f"Projected gain over {PROJECTION_DAYS} days",
-                    f"+${revenue.additional_low:,.0f} – ${revenue.additional_high:,.0f}",
-                    delta="if the SEO changes are applied", delta_color="off", border=True,
+                    "Age", f"{performance.days_since_upload:,}",
+                    delta="days since upload", delta_color="off", border=True,
                 )
-            st.caption(
-                "An order-of-magnitude estimate, not your earnings: it applies a published "
-                "average RPM for this video's category to its view count. Real RPM swings widely "
-                "with audience geography, season, video length, and ad formats — and pays nothing "
-                "at all if the channel is not in the Partner Programme."
-                + ("" if revenue.is_known_category else " This video's category is unrecognised, so a general average was used.")
-            )
+
+            if revenue is not None:
+                st.markdown("**Estimated AdSense revenue**")
+                with st.container(horizontal=True):
+                    st.metric(
+                        "Earnings to date", f"${revenue.current:,.0f}",
+                        delta=f"{revenue.category_name} · ${revenue.rpm:.2f} RPM",
+                        delta_color="off", border=True,
+                    )
+                    st.metric(
+                        f"Projected gain over {PROJECTION_DAYS} days",
+                        f"+${revenue.additional_low:,.0f} – ${revenue.additional_high:,.0f}",
+                        delta="if the SEO changes are applied", delta_color="off", border=True,
+                    )
+                st.caption(
+                    "An order-of-magnitude estimate, not your earnings: a published average RPM "
+                    "for this video's category applied to its view count. Pays nothing if the "
+                    "channel is not in the Partner Programme."
+                    + ("" if revenue.is_known_category else " This video's category is unrecognised, so a general average was used.")
+                )
 
 
 def render_shelf_life(shelf) -> None:
@@ -425,19 +427,10 @@ def render_analysis(
     if live and performance is not None and projection is not None:
         render_reach(performance, projection, original_score, optimized_score, revenue)
 
-    if shelf is not None:
-        render_shelf_life(shelf)
-
-    if not live:
-        st.caption(
-            "Keyword density, pacing, and the SEO diff are computed from live video data, "
-            "which is not stored with a saved analysis. Re-run Analyze to see them."
-        )
-
     with st.container(border=True):
         st.markdown("##### :material/difference: Before vs. after")
         if not live:
-            st.caption("Unavailable for a saved analysis.")
+            st.caption("Unavailable for a saved analysis. Re-run Analyze to see it.")
         else:
             tag_diff = diff_tags(existing_tags or [], result.get("tags", []))
             a, b, c = st.columns(3)
@@ -458,51 +451,62 @@ def render_analysis(
                 with st.expander("Description changes", icon=":material/notes:"):
                     st.code("\n".join(description_diff), language="diff")
 
-    left, right = st.columns(2)
+    if not live:
+        st.caption(
+            "Keyword density, pacing, and shelf life are computed from live video data, "
+            "which is not stored with a saved analysis. Re-run Analyze to see them."
+        )
+        return
 
-    with left:
-        with st.container(border=True):
-            st.markdown("##### :material/key: Keyword density")
-            if not transcript_text:
-                st.caption("Needs a transcript, which was not available.")
-            else:
-                mode = st.segmented_control(
-                    "Phrase length", ["2-word phrases", "3-word phrases"],
-                    default="2-word phrases", key="ngram-mode", label_visibility="collapsed",
-                )
-                n = 3 if mode == "3-word phrases" else 2
-                data = top_ngrams(transcript_text, n)
-                if data:
-                    st.bar_chart(
-                        pd.DataFrame({"phrase": [p for p, _ in data], "count": [c for _, c in data]}),
-                        x="phrase", y="count", horizontal=True, height=380,
-                    )
+    with st.expander("More analysis: keywords, pacing, shelf life", icon=":material/query_stats:"):
+        if shelf is not None:
+            render_shelf_life(shelf)
+
+        left, right = st.columns(2)
+
+        with left:
+            with st.container(border=True):
+                st.markdown("##### :material/key: Keyword density")
+                if not transcript_text:
+                    st.caption("Needs a transcript, which was not available.")
                 else:
-                    st.caption("Not enough transcript text for this phrase length.")
+                    mode = st.segmented_control(
+                        "Phrase length", ["2-word phrases", "3-word phrases"],
+                        default="2-word phrases", key="ngram-mode", label_visibility="collapsed",
+                    )
+                    n = 3 if mode == "3-word phrases" else 2
+                    data = top_ngrams(transcript_text, n)
+                    if data:
+                        st.bar_chart(
+                            pd.DataFrame({"phrase": [p for p, _ in data], "count": [c for _, c in data]}),
+                            x="phrase", y="count", horizontal=True, height=380,
+                        )
+                    else:
+                        st.caption("Not enough transcript text for this phrase length.")
 
-    with right:
-        with st.container(border=True):
-            st.markdown("##### :material/speed: Speech pacing")
-            if not transcript_segments:
-                st.caption("Needs a transcript, which was not available.")
-            else:
-                blocks = words_per_minute_blocks(transcript_segments)
-                wpm = [b.wpm for b in blocks]
-                avg = round(sum(wpm) / len(wpm)) if wpm else 0
-                gaps = find_silent_gaps(transcript_segments)
+        with right:
+            with st.container(border=True):
+                st.markdown("##### :material/speed: Speech pacing")
+                if not transcript_segments:
+                    st.caption("Needs a transcript, which was not available.")
+                else:
+                    blocks = words_per_minute_blocks(transcript_segments)
+                    wpm = [b.wpm for b in blocks]
+                    avg = round(sum(wpm) / len(wpm)) if wpm else 0
+                    gaps = find_silent_gaps(transcript_segments)
 
-                m1, m2 = st.columns(2)
-                m1.metric("Average pace", f"{avg} wpm", border=True)
-                m2.metric("Silent gaps", len(gaps), delta=f">{SILENT_GAP_THRESHOLD_SECONDS:.0f}s", delta_color="off", border=True)
+                    m1, m2 = st.columns(2)
+                    m1.metric("Average pace", f"{avg} wpm", border=True)
+                    m2.metric("Silent gaps", len(gaps), delta=f">{SILENT_GAP_THRESHOLD_SECONDS:.0f}s", delta_color="off", border=True)
 
-                st.area_chart(
-                    pd.DataFrame({"minute": [b.minute for b in blocks], "wpm": wpm}),
-                    x="minute", y="wpm", height=260,
-                )
-                if gaps:
-                    with st.expander(f"{len(gaps)} silent gap(s)", icon=":material/volume_off:"):
-                        for g in gaps[:15]:
-                            st.markdown(f"- **{g.start:.0f}s → {g.end:.0f}s** ({g.duration:.1f}s)")
+                    st.area_chart(
+                        pd.DataFrame({"minute": [b.minute for b in blocks], "wpm": wpm}),
+                        x="minute", y="wpm", height=260,
+                    )
+                    if gaps:
+                        with st.expander(f"{len(gaps)} silent gap(s)", icon=":material/volume_off:"):
+                            for g in gaps[:15]:
+                                st.markdown(f"- **{g.start:.0f}s → {g.end:.0f}s** ({g.duration:.1f}s)")
 
 
 def render_audience(
@@ -545,9 +549,10 @@ def render_audience(
             st.markdown("##### :material/image_search: Thumbnail critique")
             if not live:
                 st.caption("Re-run Analyze to critique the thumbnail.")
+            elif not thumbnail_url:
+                st.caption("No thumbnail yet — critique becomes available once you've uploaded one.")
             else:
-                if thumbnail_url:
-                    st.image(thumbnail_url, width=320)
+                st.image(thumbnail_url, width=320)
                 review = st.session_state.get("thumbnail_review")
                 if review is None:
                     st.caption("Costs one Gemini vision call — runs only when you ask for it.")
@@ -711,8 +716,9 @@ def render_report(
     cta_report=None,
     revenue=None,
     playbook: list | None = None,
+    planning: bool = False,
 ) -> None:
-    render_hero(video_id, title, channel, result, note)
+    render_hero(video_id, title, channel, result, note, planning)
 
     metadata_tab, structure_tab, analysis_tab, audience_tab, repurpose_tab, actions_tab = st.tabs([
         ":material/sell: Metadata",
@@ -822,19 +828,116 @@ with account_col:
 render_masthead()
 st.divider()
 
-with st.form("analyze", border=False):
-    url_col, button_col = st.columns([4, 1], vertical_alignment="bottom")
-    url = url_col.text_input(
-        "YouTube video URL", placeholder="https://www.youtube.com/watch?v=...",
-        label_visibility="collapsed", icon=":material/link:",
-    )
-    run = button_col.form_submit_button(
-        "Analyze", icon=":material/auto_awesome:", type="primary", width="stretch",
-    )
-    include_competitors = st.checkbox(
-        "Compare against competitors",
-        help="Uses 100x more YouTube API quota than a routine analysis. Off by default.",
-    )
+mode = st.segmented_control(
+    "Mode", ["Analyze existing video", "Plan a new video"],
+    default="Analyze existing video", label_visibility="collapsed", key="mode",
+)
+
+run = False
+run_plan = False
+
+if mode == "Plan a new video":
+    st.caption("No video needed yet — draft a title, description, and script, and get the same SEO guidance.")
+    with st.form("plan", border=False):
+        plan_title = st.text_input(
+            "Working title", placeholder="Working title for the video",
+            icon=":material/title:",
+        )
+        plan_description = st.text_area(
+            "Draft description (optional)", placeholder="Draft description, if you have one...",
+            height=100,
+        )
+        plan_tags = st.text_input(
+            "Draft tags (optional, comma-separated)", placeholder="tag one, tag two, tag three",
+            icon=":material/sell:",
+        )
+        plan_script = st.text_area(
+            "Draft script or transcript (optional)", placeholder="Paste your script or talking points...",
+            height=160,
+            help="Used for hook analysis and keyword density. Chapters are never generated here, since there's no real video duration to base timestamps on.",
+        )
+        run_plan = st.form_submit_button(
+            "Plan this video", icon=":material/auto_awesome:", type="primary", width="stretch",
+        )
+        include_competitors = st.checkbox(
+            "Compare against competitors",
+            help="Uses 100x more YouTube API quota than a routine analysis. Off by default.",
+            key="plan-competitors",
+        )
+else:
+    with st.form("analyze", border=False):
+        url_col, button_col = st.columns([4, 1], vertical_alignment="bottom")
+        url = url_col.text_input(
+            "YouTube video URL", placeholder="https://www.youtube.com/watch?v=...",
+            label_visibility="collapsed", icon=":material/link:",
+        )
+        run = button_col.form_submit_button(
+            "Analyze", icon=":material/auto_awesome:", type="primary", width="stretch",
+        )
+        include_competitors = st.checkbox(
+            "Compare against competitors",
+            help="Uses 100x more YouTube API quota than a routine analysis. Off by default.",
+            key="analyze-competitors",
+        )
+
+if run_plan:
+    st.session_state.pop("load_row", None)
+
+    if not GEMINI_API_KEY:
+        st.error("Missing GEMINI_API_KEY. Add it to your .env file.", icon=":material/key_off:")
+        st.stop()
+
+    if not plan_title.strip():
+        st.warning("Enter a working title first.", icon=":material/edit_off:")
+        st.stop()
+
+    plan_tags_list = [t.strip() for t in plan_tags.split(",") if t.strip()]
+
+    with st.status("Planning video...", expanded=True) as status:
+        meta = build_planned_meta(
+            plan_title.strip(), plan_description.strip(), plan_tags_list,
+            channel_title=f"{user_name} (planned)",
+        )
+
+        competitors = []
+        if include_competitors and YOUTUBE_API_KEY:
+            st.write(":material/groups: Finding competing videos")
+            competitors = find_competitors(meta.title, YOUTUBE_API_KEY, exclude_video_id="")
+
+        st.write(":material/auto_awesome: Generating SEO suggestions with Gemini")
+        try:
+            result = generate_seo(
+                api_keys=GEMINI_API_KEYS,
+                title=meta.title,
+                description=meta.description,
+                existing_tags=meta.tags,
+                transcript=plan_script.strip() or None,
+                comments=[],
+                suppress_chapters=True,
+            )
+        except Exception as exc:
+            status.update(label="Gemini request failed", state="error")
+            st.error(f"LLM request failed: {exc}", icon=":material/error:")
+            st.stop()
+
+        # No cache lookup here, unlike the existing-video path: a draft has no
+        # stable identity to cache against (the title/script may get edited
+        # between runs), so this always calls Gemini fresh.
+        if conn is not None:
+            try:
+                save_analysis(conn, user_name, meta.video_id, meta.title, meta.channel_title, result)
+            except Exception:
+                pass  # history is best-effort, never block the page over it
+
+        status.update(label="Plan complete", state="complete", expanded=False)
+
+    st.session_state["current_analysis"] = {
+        "meta": meta, "result": result, "top_comments": [],
+        "competitors": competitors, "include_competitors": include_competitors,
+        "transcript_segments": None, "transcript_text": plan_script.strip() or None,
+        "note": "", "planning": True,
+    }
+    st.session_state.pop("thumbnail_review", None)
 
 if run:
     st.session_state.pop("load_row", None)
@@ -932,12 +1035,14 @@ if st.session_state.get("load_row"):
             row["video_id"], row["title"], row["channel"], result,
             live=False,
             note=f"Saved {row['analyzed_at']:%d %b %Y, %H:%M} · no API quota spent",
+            planning=row["video_id"].startswith("planned-"),
         )
 
 elif st.session_state.get("current_analysis"):
     data = st.session_state["current_analysis"]
     meta = data["meta"]
     result = data["result"]
+    planning = data.get("planning", False)
 
     # Both sides are scored by the same rules, so the delta reflects the
     # metadata improvement alone. A published video keeps its hashtags in the
@@ -952,12 +1057,6 @@ elif st.session_state.get("current_analysis"):
         result.get("tags", []),
         result.get("hashtags", []),
     )
-    performance = summarize_performance(
-        meta.view_count, meta.like_count, meta.comment_count, meta.published_at
-    )
-    projection = project_views(
-        meta.view_count, performance.views_per_day, optimized_score - original_score
-    )
     # Measured against the tags the creator would actually publish -- the
     # generated set plus what they already had -- so the gap is not inflated by
     # tags this run is already recommending.
@@ -968,14 +1067,27 @@ elif st.session_state.get("current_analysis"):
     )
     shelf = classify(meta.title, meta.tags, data["transcript_text"])
     cta_report = analyze_ctas(data["transcript_segments"])
-    # Revenue rides on the projected extra views, not the whole projection --
-    # the baseline views would have arrived with or without the SEO changes.
-    revenue = estimate_revenue(
-        meta.view_count,
-        meta.category_id,
-        projection.low_views - projection.baseline_views,
-        projection.high_views - projection.baseline_views,
-    )
+
+    # A planned video has no real views, publish date, or category yet -- a
+    # projection or revenue estimate off all-zero inputs would be a meaningless
+    # "$0" box, not a forecast, so these are simply never computed for one.
+    performance = projection = revenue = None
+    if not planning:
+        performance = summarize_performance(
+            meta.view_count, meta.like_count, meta.comment_count, meta.published_at
+        )
+        projection = project_views(
+            meta.view_count, performance.views_per_day, optimized_score - original_score
+        )
+        # Revenue rides on the projected extra views, not the whole projection --
+        # the baseline views would have arrived with or without the SEO changes.
+        revenue = estimate_revenue(
+            meta.view_count,
+            meta.category_id,
+            projection.low_views - projection.baseline_views,
+            projection.high_views - projection.baseline_views,
+        )
+
     playbook = build_playbook(
         optimized_rules, gap, cta_report, shelf, st.session_state.get("thumbnail_review")
     )
@@ -1000,6 +1112,7 @@ elif st.session_state.get("current_analysis"):
         cta_report=cta_report,
         revenue=revenue,
         playbook=playbook,
+        planning=planning,
     )
 
 else:
