@@ -1,5 +1,5 @@
 import os
-from datetime import date, datetime, timezone
+from datetime import date
 
 import altair as alt
 import pandas as pd
@@ -7,18 +7,10 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from analytics import PROJECTION_DAYS, project_views, summarize_performance
-from channel import ChannelNotFoundError, fetch_channel_videos, resolve_channel
-from channel_stats import (
-    cadence_report, duration_sweet_spot, find_outliers, refresh_queue,
-    title_feature_report, topic_clusters, views_per_day,
-)
 from comments import fetch_top_comments
 from competitors import audience_gap, find_competitors
 from cta import LATE_END, PRIME_END, PRIME_START, TOO_EARLY_BEFORE, analyze_ctas
-from db import (
-    ensure_schema, get_analysis, get_cached_analysis, get_connection,
-    list_recent, save_analysis, save_channel_videos, upsert_channel,
-)
+from db import ensure_schema, get_analysis, get_cached_analysis, get_connection, list_recent, save_analysis
 from export import build_csv_export, build_json_export, build_pdf_export
 from keywords import estimate_spoken_length, top_ngrams
 from limits import check_limits, compute_health_score, extract_hashtags
@@ -853,89 +845,6 @@ def render_actions(
             )
 
 
-def render_channel_dashboard(channel_info: dict, videos: list) -> None:
-    """Cross-video channel intelligence -- everything here is pure Python
-    over already-ingested public data, no Gemini call. Degrades section by
-    section on small channels since each channel_stats function has its own
-    minimum-sample guard and returns empty rather than a noisy report."""
-    with st.container(horizontal=True, vertical_alignment="center"):
-        if channel_info.get("thumbnail_url"):
-            st.image(channel_info["thumbnail_url"], width=64)
-        st.markdown(f"### {channel_info['title']}")
-    st.caption(f"{len(videos)} videos ingested · last updated {channel_info['last_ingested_at']:%d %b %Y}")
-
-    outliers_tab, titles_tab, topics_tab, refresh_tab, cadence_tab = st.tabs([
-        ":material/trending_up: Outliers",
-        ":material/title: Title formula",
-        ":material/category: Topics",
-        ":material/build: Refresh queue",
-        ":material/calendar_month: Cadence",
-    ])
-
-    with outliers_tab:
-        over, under = find_outliers(videos)
-        if not over and not under:
-            st.caption("Not enough videos yet for this channel's median to be meaningful.")
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("##### :material/arrow_upward: Over-performers")
-            st.caption("Study these -- whatever they did, do it again.")
-            for e in over[:8]:
-                st.markdown(f"**{e.video.title}**")
-                st.caption(f"{e.views_per_day:.0f} views/day · {e.ratio_to_median:.1f}x channel median")
-        with col2:
-            st.markdown("##### :material/arrow_downward: Under-performers")
-            st.caption("The diagnostic set -- what's different about these.")
-            for e in under[:8]:
-                st.markdown(f"**{e.video.title}**")
-                st.caption(f"{e.views_per_day:.0f} views/day · {e.ratio_to_median:.1f}x channel median")
-
-    with titles_tab:
-        feature_stats = title_feature_report(videos)
-        if not feature_stats:
-            st.caption("Not enough videos on both sides of any title feature yet to compare.")
-        for s in feature_stats:
-            lift_label = f"{s.lift:.1f}x" if s.lift >= 1 else f"{s.lift:.1f}x (worse)"
-            st.markdown(f"**{s.label}** — {lift_label}")
-            st.caption(
-                f"With it ({s.with_count} videos): {s.with_median:.0f} views/day median. "
-                f"Without it ({s.without_count} videos): {s.without_median:.0f} views/day median."
-            )
-
-    with topics_tab:
-        clusters = topic_clusters(videos)
-        if not clusters:
-            st.caption("Not enough recurring title keywords yet to form topic clusters.")
-        for c in clusters[:10]:
-            st.markdown(f"**{c.keyword}** — {c.video_count} videos, {c.median_views_per_day:.0f} views/day median")
-            st.caption(" · ".join(c.example_titles))
-
-    with refresh_tab:
-        candidates = refresh_queue(videos)
-        if not candidates:
-            st.caption("No old, still-earning, weak-metadata videos found -- either the channel is young or metadata is already solid.")
-        st.caption(f"{len(candidates)} video{'s' if len(candidates) != 1 else ''} worth a five-minute metadata pass, ranked by residual traffic")
-        for c in candidates:
-            st.markdown(f"**{c.video.title}**")
-            st.caption(c.reason)
-
-    with cadence_tab:
-        cadence = cadence_report(videos)
-        durations = duration_sweet_spot(videos)
-        if cadence is not None:
-            st.markdown(
-                f"Uploads roughly every **{cadence.median_gap_days:.0f} days**, "
-                f"most often on **{cadence.most_common_weekday}**. "
-                f"Consistency: ±{cadence.consistency_stddev_days:.0f} days."
-            )
-        else:
-            st.caption("Not enough upload history yet to read a cadence.")
-        if durations:
-            st.markdown("##### Duration sweet spot")
-            for d in durations:
-                st.caption(f"{d.label}: {d.video_count} videos, {d.median_views_per_day:.0f} views/day median")
-
-
 def render_report(
     video_id: str,
     title: str,
@@ -1080,13 +989,12 @@ render_masthead()
 st.divider()
 
 mode = st.segmented_control(
-    "Mode", ["Analyze existing video", "Plan a new video", "My channel"],
+    "Mode", ["Analyze existing video", "Plan a new video"],
     default="Analyze existing video", label_visibility="collapsed", key="mode",
 )
 
 run = False
 run_plan = False
-run_channel_ingest = False
 
 if mode == "Plan a new video":
     st.caption("No video needed yet — draft a title, description, and script, and get the same SEO guidance.")
@@ -1125,17 +1033,6 @@ if mode == "Plan a new video":
             help="Uses 100x more YouTube API quota than a routine analysis. Off by default.",
             key="plan-competitors",
         )
-elif mode == "My channel":
-    st.caption("Enter a channel handle to pull its full public upload history and see what actually performs, based on its own past videos — no Gemini call, just YouTube's public data.")
-    with st.form("channel", border=False):
-        handle_col, button_col = st.columns([4, 1], vertical_alignment="bottom")
-        channel_handle = handle_col.text_input(
-            "Channel handle", placeholder="@channelhandle or a channel URL",
-            label_visibility="collapsed", icon=":material/alternate_email:",
-        )
-        run_channel_ingest = button_col.form_submit_button(
-            "Load channel", icon=":material/download:", type="primary", width="stretch",
-        )
 else:
     with st.form("analyze", border=False):
         url_col, button_col = st.columns([4, 1], vertical_alignment="bottom")
@@ -1151,58 +1048,6 @@ else:
             help="Uses 100x more YouTube API quota than a routine analysis. Off by default.",
             key="analyze-competitors",
         )
-
-if run_channel_ingest:
-    if not YOUTUBE_API_KEY:
-        st.error("Missing YOUTUBE_API_KEY. Add it to your .env file.", icon=":material/key_off:")
-        st.stop()
-    if not channel_handle.strip():
-        st.warning("Enter a channel handle first.", icon=":material/edit_off:")
-        st.stop()
-
-    with st.status("Loading channel...", expanded=True) as status:
-        try:
-            st.write(":material/badge: Resolving channel")
-            info = resolve_channel(channel_handle, YOUTUBE_API_KEY)
-        except ChannelNotFoundError as exc:
-            status.update(label="Channel not found", state="error")
-            st.error(str(exc), icon=":material/error:")
-            st.stop()
-        except Exception as exc:
-            status.update(label="Channel lookup failed", state="error")
-            st.error(f"Failed to resolve channel: {exc}", icon=":material/error:")
-            st.stop()
-
-        st.write(":material/video_library: Fetching upload history")
-        try:
-            videos = fetch_channel_videos(info.uploads_playlist_id, YOUTUBE_API_KEY)
-        except Exception as exc:
-            status.update(label="Fetch failed", state="error")
-            st.error(f"Failed to fetch channel videos: {exc}", icon=":material/error:")
-            st.stop()
-
-        if conn is not None:
-            try:
-                upsert_channel(conn, info.channel_id, info.handle, info.title, info.thumbnail_url)
-                save_channel_videos(conn, info.channel_id, videos)
-            except Exception:
-                pass  # channel history is best-effort, never block the page over it
-
-        status.update(label=f"Loaded {len(videos)} videos", state="complete", expanded=False)
-
-    st.session_state["current_channel"] = {
-        "info": {
-            "channel_id": info.channel_id, "handle": info.handle, "title": info.title,
-            "thumbnail_url": info.thumbnail_url, "last_ingested_at": datetime.now(timezone.utc),
-        },
-        "videos": videos,
-    }
-    st.session_state.pop("current_analysis", None)
-    st.session_state.pop("load_row", None)
-
-if mode == "My channel" and st.session_state.get("current_channel"):
-    channel_data = st.session_state["current_channel"]
-    render_channel_dashboard(channel_data["info"], channel_data["videos"])
 
 if run_plan:
     st.session_state.pop("load_row", None)
