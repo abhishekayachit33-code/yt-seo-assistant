@@ -8,6 +8,12 @@ from limits import TAGS_MAX
 
 MODEL = "gemini-flash-latest"
 
+# Bump this on any change to SYSTEM_PROMPT or SEO_SCHEMA. It feeds the cache
+# fingerprint (cache_key.py), so a prompt/schema edit invalidates every
+# previously cached analysis automatically instead of silently serving
+# output shaped by a prompt that no longer exists.
+PROMPT_VERSION = 1
+
 SYSTEM_PROMPT = """
     You are a senior, data-driven YouTube Growth Strategist. Your job is to analyze a video's existing metadata (title, description, tags), transcript, and audience comments, and prescribe highly specific, evidence-based optimizations.
 

@@ -16,6 +16,8 @@ CREATE TABLE IF NOT EXISTS analyses (
 ALTER TABLE analyses ADD COLUMN IF NOT EXISTS user_name TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_analyses_user_name ON analyses(user_name);
 CREATE INDEX IF NOT EXISTS idx_analyses_user_video ON analyses(user_name, video_id);
+ALTER TABLE analyses ADD COLUMN IF NOT EXISTS input_fingerprint TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_analyses_video_fingerprint ON analyses(video_id, input_fingerprint, analyzed_at DESC);
 """
 
 
@@ -61,10 +63,17 @@ def ensure_schema(conn: psycopg.Connection) -> bool:
         return False
 
 
-def save_analysis(conn: psycopg.Connection, user_name: str, video_id: str, title: str, channel: str, result: dict) -> None:
+def save_analysis(
+    conn: psycopg.Connection, user_name: str, video_id: str, title: str, channel: str,
+    result: dict, input_fingerprint: str = "",
+) -> None:
+    """input_fingerprint is what get_cached_analysis matches on -- always
+    written, even for a planning-mode draft that never gets cache-looked-up,
+    so history stays consistent regardless of caller."""
     conn.execute(
-        "INSERT INTO analyses (user_name, video_id, title, channel, result_json) VALUES (%s, %s, %s, %s, %s)",
-        (user_name, video_id, title, channel, Jsonb(result)),
+        "INSERT INTO analyses (user_name, video_id, title, channel, result_json, input_fingerprint) "
+        "VALUES (%s, %s, %s, %s, %s, %s)",
+        (user_name, video_id, title, channel, Jsonb(result), input_fingerprint),
     )
     conn.commit()
 
@@ -90,13 +99,19 @@ def list_recent(conn: psycopg.Connection, user_name: str, limit: int = 10, searc
     ]
 
 
-def get_cached_analysis(conn: psycopg.Connection, user_name: str, video_id: str) -> dict | None:
-    """Most recent saved analysis for this exact video, scoped to the user --
-    lets a repeat "Analyze" on the same URL skip the Gemini call entirely."""
+def get_cached_analysis(conn: psycopg.Connection, video_id: str, input_fingerprint: str) -> dict | None:
+    """Most recent saved analysis matching this exact video AND input
+    fingerprint -- deliberately NOT scoped by user_name. The analysis is a
+    property of the video's public metadata plus the prompt version, not of
+    who clicked Analyze, so any user's prior run can serve any other user's
+    identical request. The fingerprint match is what keeps this safe: a
+    prompt change, or the video's title/description/tags/transcript/comments
+    changing since the last run, produces a different fingerprint and misses
+    the cache rather than serving stale output."""
     row = conn.execute(
-        "SELECT result_json FROM analyses WHERE user_name = %s AND video_id = %s "
+        "SELECT result_json FROM analyses WHERE video_id = %s AND input_fingerprint = %s "
         "ORDER BY analyzed_at DESC LIMIT 1",
-        (user_name, video_id),
+        (video_id, input_fingerprint),
     ).fetchone()
     if row is None:
         return None
