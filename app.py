@@ -7,6 +7,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from analytics import PROJECTION_DAYS, project_views, summarize_performance
+from cache_key import compute_fingerprint
 from comments import fetch_top_comments
 from competitors import audience_gap, find_competitors
 from cta import LATE_END, PRIME_END, PRIME_START, TOO_EARLY_BEFORE, analyze_ctas
@@ -1091,10 +1092,15 @@ if run_plan:
 
         # No cache lookup here, unlike the existing-video path: a draft has no
         # stable identity to cache against (the title/script may get edited
-        # between runs), so this always calls Gemini fresh.
+        # between runs), so this always calls Gemini fresh. A fingerprint is
+        # still computed and saved for consistency with the history table,
+        # even though nothing ever looks it up for a planned video.
         if conn is not None:
             try:
-                save_analysis(conn, user_name, meta.video_id, meta.title, meta.channel_title, result)
+                fingerprint = compute_fingerprint(
+                    meta.title, meta.description, meta.tags, plan_script.strip() or None, []
+                )
+                save_analysis(conn, user_name, meta.video_id, meta.title, meta.channel_title, result, fingerprint)
             except Exception:
                 pass  # history is best-effort, never block the page over it
 
@@ -1179,11 +1185,17 @@ if run:
             st.write(":material/groups: Finding competing videos")
             competitors = find_competitors(meta.title, YOUTUBE_API_KEY, exclude_video_id=video_id)
 
-        cached_result = get_cached_analysis(conn, user_name, video_id) if conn is not None else None
+        # Global cache: keyed on the video's own content, not on who's asking,
+        # so any user's prior run of the exact same inputs serves everyone
+        # else too. The fingerprint (title/description/tags/transcript/
+        # comments/PROMPT_VERSION) is what keeps this safe -- it misses
+        # instead of serving stale output the moment any of that changes.
+        fingerprint = compute_fingerprint(meta.title, meta.description, meta.tags, transcript, top_comments)
+        cached_result = get_cached_analysis(conn, video_id, fingerprint) if conn is not None else None
         if cached_result is not None:
             result = cached_result
-            st.write(":material/bolt: Found a saved analysis — skipping Gemini entirely")
-            note = "Loaded from a previous analysis of this video — 0 Gemini calls spent."
+            st.write(":material/bolt: Found a matching analysis — skipping Gemini entirely")
+            note = "Already analyzed with these exact inputs (by you or another user) — 0 Gemini calls spent."
         else:
             st.write(":material/auto_awesome: Generating SEO suggestions with Gemini")
             note = ""
@@ -1203,7 +1215,7 @@ if run:
 
             if conn is not None:
                 try:
-                    save_analysis(conn, user_name, video_id, meta.title, meta.channel_title, result)
+                    save_analysis(conn, user_name, video_id, meta.title, meta.channel_title, result, fingerprint)
                 except Exception:
                     pass  # history is best-effort, never block the page over it
 
