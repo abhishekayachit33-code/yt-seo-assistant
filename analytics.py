@@ -1,10 +1,13 @@
 """Performance snapshot and projected reach uplift.
 
 The projection is a transparent heuristic, not a prediction: it maps how far the
-metadata compliance score moved to a published band of organic-search uplift,
-then applies that band to the video's own observed view velocity. No model is
-asked to guess a view count, and every number here is reproducible from the
-inputs.
+metadata compliance score moved to an uplift band this app invented (UPLIFT_BANDS
+below is NOT sourced from any published study -- there is no external research
+this app is aware of that quantifies "N-point metadata score improvement equals
+X% more organic views"), then applies that band to the video's own observed view
+velocity. No model is asked to guess a view count, and every number here is
+reproducible from the inputs -- but the band itself is an editorial judgment
+call, not a cited fact, and should read as one.
 """
 
 from dataclasses import dataclass

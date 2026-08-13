@@ -1,3 +1,4 @@
+import logging
 import os
 from datetime import date
 
@@ -13,10 +14,13 @@ from competitors import audience_gap, find_competitors
 from cta import LATE_END, PRIME_END, PRIME_START, TOO_EARLY_BEFORE, analyze_ctas
 from db import ensure_schema, get_analysis, get_cached_analysis, get_connection, list_recent, save_analysis
 from export import build_csv_export, build_json_export, build_pdf_export
+import keyword_pipeline
+from keyword_rank import content_gaps, format_keyword_evidence, merge_into_tags
 from keywords import estimate_spoken_length, top_ngrams
 from limits import check_limits, compute_health_score, extract_hashtags
-from llm import generate_seo
+from llm import VideoUnderstanding, enforce_tag_char_limit, generate_seo, understand_video
 from pacing import SILENT_GAP_THRESHOLD_SECONDS, find_silent_gaps, words_per_minute_blocks
+from plan_input import is_plan_input_sufficient
 from playbook import build_playbook, build_preproduction_checklist
 from readability import scan_readability
 from revenue import estimate_revenue
@@ -28,6 +32,8 @@ from transcript import fetch_transcript_segments, segments_to_text
 from youtube import InvalidURLError, VideoNotFoundError, build_planned_meta, fetch_metadata, parse_video_id
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -89,8 +95,20 @@ def render_hero(video_id: str, title: str, channel: str, result: dict, note: str
             if not planning:
                 badges += f" :gray-badge[:material/segment: {len(result.get('chapters', []))} chapters]"
             st.markdown(badges)
+            if result.get("content_summary"):
+                st.caption(result["content_summary"])
             if note:
                 st.caption(note)
+
+    if result.get("target_audience"):
+        with st.container(border=True):
+            st.markdown("##### :material/person_search: Who this video is for")
+            st.write(result["target_audience"])
+            if result.get("audience_next_question"):
+                st.caption(
+                    "What they'll most likely search next — a strong candidate for your "
+                    f"next video: **{result['audience_next_question']}**"
+                )
 
     hard_limits = check_limits(
         title, result.get("description", ""), result.get("tags", []), result.get("hashtags", [])
@@ -431,6 +449,10 @@ def render_shelf_life(shelf) -> None:
 
         st.markdown(f"**Classification: {shelf.classification}**")
         st.caption(shelf.expectation)
+        st.caption(
+            "Based on dating/evergreen language in the title, tags, and transcript -- "
+            "a keyword read, not a traffic measurement."
+        )
 
         if not shelf.is_unclassified:
             signal_left, signal_right = st.columns(2)
@@ -846,6 +868,126 @@ def render_actions(
             )
 
 
+_CONFIDENCE_COLOR = {"high": "green", "medium": "orange", "low": "red"}
+
+
+def _render_keyword(keyword, rank_label: str = "") -> None:
+    """One keyword plus the evidence behind it. The evidence is the point --
+    a ranked list with no stated reasoning is indistinguishable from a model
+    inventing plausible-looking keywords, which is what this whole pipeline
+    exists to replace."""
+    header = f"**{rank_label}{keyword.phrase}**" if rank_label else f"**{keyword.phrase}**"
+    st.markdown(header)
+    st.caption(" · ".join(keyword.evidence))
+    bars = st.columns(4)
+    for col, (label, value) in zip(bars, [
+        ("Search", keyword.autocomplete_strength),
+        ("Specific", keyword.specificity),
+        ("Covered", keyword.coverage),
+        ("Relevant", keyword.candidate.relevance),
+    ]):
+        col.progress(min(1.0, max(0.0, value)), text=f"{label} {value:.0%}")
+
+
+def render_keyword_strategy(keyword_result, planning: bool = False) -> None:
+    if keyword_result is None:
+        st.caption(
+            "Search demand research wasn't run for this analysis. "
+            "Tick “Research search demand” before analysing to include it."
+        )
+        return
+
+    strategy = keyword_result.strategy
+    diagnostics = (
+        f"{keyword_result.suggestions_found} live search suggestions · "
+        f"{keyword_result.candidate_count} candidates considered · "
+        f"{keyword_result.judged_count} judged by Gemini"
+    )
+
+    if strategy.primary is None:
+        # candidate_count == 0 means every lane came back empty -- a genuine
+        # endpoint/data problem. candidate_count > 0 means candidates existed
+        # but none were relevant enough to show even in the weak-evidence
+        # fallback -- a different failure, and the old message here claimed
+        # the former regardless of which one actually happened.
+        if keyword_result.candidate_count == 0:
+            st.caption(
+                "No candidates found at all — YouTube's suggestion endpoint likely "
+                "returned nothing, and there was no transcript to fall back on."
+            )
+        else:
+            st.caption(
+                f"{keyword_result.candidate_count} candidates were found, but none "
+                "were relevant enough to this video to show, even at reduced "
+                "confidence. This usually means the video's summary and its "
+                "search suggestions share little vocabulary."
+            )
+            st.caption(diagnostics)
+        return
+
+    color = _CONFIDENCE_COLOR.get(strategy.confidence, "gray")
+    with st.container(border=True):
+        st.markdown(
+            f"##### :material/travel_explore: Keyword strategy "
+            f":{color}-badge[{strategy.confidence} confidence]"
+        )
+        if keyword_result.weak_evidence:
+            st.warning(
+                "Nothing cleared the normal relevance bar for this video — these are "
+                "the closest matches found, shown at low confidence rather than not at all.",
+                icon=":material/warning:",
+            )
+        st.caption(strategy.confidence_reason)
+        st.caption(diagnostics)
+
+    with st.container(border=True):
+        st.markdown("##### :material/target: Primary keyword")
+        st.caption("Build your title and the first line of your description around this one.")
+        _render_keyword(strategy.primary)
+
+    if strategy.secondary:
+        with st.container(border=True):
+            st.markdown("##### :material/layers: Secondary keywords")
+            st.caption("Work these into the description and tags.")
+            for i, keyword in enumerate(strategy.secondary, 1):
+                _render_keyword(keyword, f"{i}. ")
+                if i < len(strategy.secondary):
+                    st.divider()
+
+    if strategy.long_tail:
+        with st.container(border=True):
+            st.markdown("##### :material/route: Long-tail targets")
+            st.caption(
+                "Lower competition and easier to rank for than the head terms above — "
+                "often the realistic way in for a smaller channel."
+            )
+            for keyword in strategy.long_tail:
+                st.markdown(f"**{keyword.phrase}**")
+                st.caption(" · ".join(keyword.evidence))
+
+    # Planning only. For a published video, "high demand, you don't cover it"
+    # is a warning not to target it; for a draft it's the most actionable
+    # thing here, because there's still time to go write that section.
+    if planning:
+        gaps = content_gaps(strategy)
+        with st.container(border=True):
+            st.markdown("##### :material/lightbulb: Cover these in your script")
+            if not gaps:
+                st.caption(
+                    "Nothing obvious missing — the in-demand phrases found are already "
+                    "reflected in your draft."
+                )
+            else:
+                st.caption(
+                    "Real search demand your draft doesn't address yet. Each of these is "
+                    "something people actively search for that your current title, "
+                    "description and script don't cover."
+                )
+                for keyword in gaps:
+                    st.markdown(f"**{keyword.phrase}**")
+                    st.caption(" · ".join(keyword.evidence))
+
+
 def render_report(
     video_id: str,
     title: str,
@@ -876,10 +1018,12 @@ def render_report(
     readability=None,
     variants: list | None = None,
     checklist=None,
+    keyword_result=None,
 ) -> None:
     render_hero(video_id, title, channel, result, note, planning)
 
-    metadata_tab, structure_tab, analysis_tab, audience_tab, repurpose_tab, actions_tab = st.tabs([
+    keywords_tab, metadata_tab, structure_tab, analysis_tab, audience_tab, repurpose_tab, actions_tab = st.tabs([
+        ":material/travel_explore: Keywords",
         ":material/sell: Metadata",
         ":material/segment: Structure",
         ":material/query_stats: Analysis",
@@ -888,6 +1032,8 @@ def render_report(
         ":material/checklist: Actions",
     ])
 
+    with keywords_tab:
+        render_keyword_strategy(keyword_result, planning)
     with metadata_tab:
         if planning and variants and len(variants) > 1:
             render_variant_comparison(variants)
@@ -996,6 +1142,7 @@ mode = st.segmented_control(
 
 run = False
 run_plan = False
+run_keyword_pipeline = False
 
 if mode == "Plan a new video":
     st.caption("No video needed yet — draft a title, description, and script, and get the same SEO guidance.")
@@ -1018,10 +1165,10 @@ if mode == "Plan a new video":
             help="Used for hook analysis and keyword density. Chapters are never generated here, since there's no real video duration to base timestamps on.",
         )
         plan_title_variants = st.text_area(
-            "Additional title variants (optional, up to 2, one per line)",
-            placeholder="Alternate title 1\nAlternate title 2",
+            "Alternative title to compare (optional, one)",
+            placeholder="An alternative title to compare against",
             height=70,
-            help="Each variant runs its own full Gemini analysis to compare — up to 2x-3x the usual request cost.",
+            help="Runs one extra full Gemini analysis so the two titles can be compared side by side.",
         )
         plan_thumbnail = st.file_uploader(
             "Thumbnail concept (optional)", type=["png", "jpg", "jpeg", "webp"],
@@ -1033,6 +1180,14 @@ if mode == "Plan a new video":
             "Compare against competitors",
             help="Uses 100x more YouTube API quota than a routine analysis. Off by default.",
             key="plan-competitors",
+        )
+        run_keyword_pipeline = st.checkbox(
+            "Research search demand",
+            value=True,
+            help="Pulls real YouTube search suggestions before writing anything, so the titles "
+                 "are built around what people actually search for — and shows which in-demand "
+                 "topics your draft doesn't cover yet. Costs one extra Gemini call.",
+            key="plan-keywords",
         )
 else:
     with st.form("analyze", border=False):
@@ -1049,6 +1204,14 @@ else:
             help="Uses 100x more YouTube API quota than a routine analysis. Off by default.",
             key="analyze-competitors",
         )
+        run_keyword_pipeline = st.checkbox(
+            "Research search demand",
+            value=True,
+            help="Pulls real YouTube search suggestions to find what people actually type, "
+                 "then ranks keywords by demand, specificity, and how well your video covers them. "
+                 "Costs one extra Gemini call.",
+            key="analyze-keywords",
+        )
 
 if run_plan:
     st.session_state.pop("load_row", None)
@@ -1063,16 +1226,74 @@ if run_plan:
 
     plan_tags_list = [t.strip() for t in plan_tags.split(",") if t.strip()]
 
+    # Hard refusal, not graceful degradation. Everything downstream -- seeds,
+    # autocomplete, audience -- is derived from what's typed here. Too little
+    # input doesn't produce a slightly worse plan, it produces a confident
+    # plan about nothing, which is worse than no plan at all. The analyze
+    # path can degrade gracefully because it always has real video metadata
+    # to fall back on; this path has only what the user typed.
+    if not is_plan_input_sufficient(plan_title, plan_description, plan_script, plan_tags_list):
+        st.error(
+            "Not enough to plan from. A working title alone isn't enough to research real "
+            "search demand or judge who this is for — the result would be confident guesswork.\n\n"
+            "Add **at least one** of: a more specific title (4+ meaningful words naming the "
+            "actual topic), a draft description, a draft script, or draft tags.",
+            icon=":material/edit_off:",
+        )
+        st.stop()
+
     with st.status("Planning video...", expanded=True) as status:
         meta = build_planned_meta(
             plan_title.strip(), plan_description.strip(), plan_tags_list,
             channel_title=f"{user_name} (planned)",
         )
+        plan_script_text = plan_script.strip() or None
 
         competitors = []
         if include_competitors and YOUTUBE_API_KEY:
             st.write(":material/groups: Finding competing videos")
             competitors = find_competitors(meta.title, YOUTUBE_API_KEY, exclude_video_id="")
+
+        # Same two-phase shape as the analyze path, and for the same reason:
+        # keyword evidence has to exist BEFORE the creative call so it can
+        # shape the titles, rather than being reconciled in afterward. It
+        # matters more here -- nothing is recorded yet, so demand data can
+        # still change what actually gets made.
+        st.write(":material/travel_explore: Understanding the draft")
+        try:
+            understanding = understand_video(
+                api_keys=GEMINI_API_KEYS,
+                title=meta.title,
+                description=meta.description,
+                existing_tags=meta.tags,
+                transcript=plan_script_text,
+                comments=[],
+            )
+        except Exception as exc:
+            logger.warning("understand_video failed in planning mode: %s", exc)
+            understanding = VideoUnderstanding()
+
+        keyword_result = None
+        if run_keyword_pipeline:
+            st.write(":material/travel_explore: Researching what people actually search for")
+            try:
+                keyword_result = keyword_pipeline.run(
+                    api_keys=GEMINI_API_KEYS,
+                    content_summary=understanding.content_summary,
+                    title=meta.title,
+                    description=meta.description,
+                    existing_tags=meta.tags,
+                    transcript=plan_script_text,
+                    competitors=competitors,
+                    planning=True,
+                )
+            except Exception as exc:
+                logger.warning("keyword pipeline failed in planning mode: %s", exc)
+                st.write(":material/warning: Keyword research unavailable this run")
+
+        keyword_evidence = None
+        if keyword_result is not None and not keyword_result.weak_evidence:
+            keyword_evidence = format_keyword_evidence(keyword_result.strategy) or None
 
         st.write(":material/auto_awesome: Generating SEO suggestions with Gemini")
         try:
@@ -1081,35 +1302,32 @@ if run_plan:
                 title=meta.title,
                 description=meta.description,
                 existing_tags=meta.tags,
-                transcript=plan_script.strip() or None,
+                transcript=plan_script_text,
                 comments=[],
                 suppress_chapters=True,
+                known_content_summary=understanding.content_summary or None,
+                keyword_evidence=keyword_evidence,
+                target_audience=understanding.target_audience or None,
             )
         except Exception as exc:
             status.update(label="Gemini request failed", state="error")
             st.error(f"LLM request failed: {exc}", icon=":material/error:")
             st.stop()
 
-        # No cache lookup here, unlike the existing-video path: a draft has no
-        # stable identity to cache against (the title/script may get edited
-        # between runs), so this always calls Gemini fresh. A fingerprint is
-        # still computed and saved for consistency with the history table,
-        # even though nothing ever looks it up for a planned video.
-        if conn is not None:
-            try:
-                fingerprint = compute_fingerprint(
-                    meta.title, meta.description, meta.tags, plan_script.strip() or None, []
-                )
-                save_analysis(conn, user_name, meta.video_id, meta.title, meta.channel_title, result, fingerprint)
-            except Exception:
-                pass  # history is best-effort, never block the page over it
+        result["target_audience"] = understanding.target_audience
+        result["audience_next_question"] = understanding.audience_next_question
 
         # Each variant is a full, independent generate_seo() call (own tags,
         # description, hook) -- not a free structural comparison -- capped at
-        # 2 so one planning session can't burn more than 3x the usual request
-        # cost. The primary result above stays the one driving every other
-        # tab; variants exist only for the comparison view.
-        variant_titles = [t.strip() for t in plan_title_variants.splitlines() if t.strip()][:2]
+        # 1. With phase 1 and the keyword judge now also running, the old cap
+        # of 2 would have put a single planning session at 6+ Gemini calls
+        # against a 20/day budget, in the one mode people iterate in most.
+        #
+        # Variants reuse the SAME keyword_evidence and target_audience rather
+        # than re-researching: they are alternative framings of one video
+        # concept, so the demand data behind them is identical and a second
+        # pipeline run would spend a call to rediscover it.
+        variant_titles = [t.strip() for t in plan_title_variants.splitlines() if t.strip()][:1]
         variants = [(meta.title, result)]
         for variant_title in variant_titles:
             st.write(f":material/auto_awesome: Generating variant: {variant_title}")
@@ -1119,21 +1337,51 @@ if run_plan:
                     title=variant_title,
                     description=meta.description,
                     existing_tags=meta.tags,
-                    transcript=plan_script.strip() or None,
+                    transcript=plan_script_text,
                     comments=[],
                     suppress_chapters=True,
+                    known_content_summary=understanding.content_summary or None,
+                    keyword_evidence=keyword_evidence,
+                    target_audience=understanding.target_audience or None,
                 )
             except Exception:
                 continue  # one variant failing is not worth aborting the whole plan
             variants.append((variant_title, variant_result))
+
+        # Same safety net as the analyze path: the model saw the evidence as
+        # context, but nothing guarantees it echoed the phrases into tags.
+        if keyword_result is not None and not keyword_result.weak_evidence:
+            result["tags"] = enforce_tag_char_limit(
+                merge_into_tags(result.get("tags", []), keyword_result.strategy)
+            )
+
+        # Saved AFTER the tag merge and the audience fields are folded in, so
+        # what history stores is what the report actually showed. Saving
+        # earlier (as this did) persisted a pre-merge copy with different
+        # tags than the user saw on screen.
+        #
+        # No cache lookup on this path, unlike the existing-video one: a draft
+        # has no stable identity to cache against (title/script change between
+        # runs), so planning always calls Gemini fresh. The fingerprint is
+        # still written for consistency with the history table, even though
+        # nothing ever looks it up for a planned video.
+        if conn is not None:
+            try:
+                fingerprint = compute_fingerprint(
+                    meta.title, meta.description, meta.tags, plan_script_text, []
+                )
+                save_analysis(conn, user_name, meta.video_id, meta.title, meta.channel_title, result, fingerprint)
+            except Exception:
+                pass  # history is best-effort, never block the page over it
 
         status.update(label="Plan complete", state="complete", expanded=False)
 
     st.session_state["current_analysis"] = {
         "meta": meta, "result": result, "top_comments": [],
         "competitors": competitors, "include_competitors": include_competitors,
-        "transcript_segments": None, "transcript_text": plan_script.strip() or None,
+        "transcript_segments": None, "transcript_text": plan_script_text,
         "note": "", "planning": True, "variants": variants,
+        "keyword_result": keyword_result,
         "thumbnail_upload": (
             {"bytes": plan_thumbnail.getvalue(), "mime_type": plan_thumbnail.type}
             if plan_thumbnail is not None else None
@@ -1192,15 +1440,53 @@ if run:
         # instead of serving stale output the moment any of that changes.
         fingerprint = compute_fingerprint(meta.title, meta.description, meta.tags, transcript, top_comments)
         cached_result = get_cached_analysis(conn, video_id, fingerprint) if conn is not None else None
+
+        def _run_keyword_pipeline(content_summary: str) -> keyword_pipeline.PipelineResult | None:
+            """Shared by both the cache-hit and cache-miss paths below.
+            Deliberately NOT covered by the analysis cache: search
+            suggestions are time-varying, so a strategy cached alongside a
+            months-old analysis would be stale in a way the fingerprint
+            can't detect. Re-running every click is correct -- which is also
+            why this is a checkbox, since it costs a Gemini call even when
+            the SEO analysis itself came back from cache."""
+            if not run_keyword_pipeline:
+                return None
+            st.write(":material/travel_explore: Researching what people actually search for")
+            try:
+                return keyword_pipeline.run(
+                    api_keys=GEMINI_API_KEYS,
+                    content_summary=content_summary,
+                    title=meta.title,
+                    description=meta.description,
+                    existing_tags=meta.tags,
+                    transcript=transcript,
+                    transcript_segments=transcript_segments,
+                    competitors=competitors,
+                )
+            except Exception as exc:
+                # Same best-effort contract as every other secondary feature:
+                # a failed keyword lane must never cost the user their report.
+                # Logged rather than swallowed -- a silent except here means
+                # nobody, including whoever runs this app, can tell the
+                # pipeline is broken or how often.
+                logger.warning("keyword pipeline failed, continuing without it: %s", exc)
+                st.write(":material/warning: Keyword research unavailable this run")
+                return None
+
         if cached_result is not None:
             result = cached_result
             st.write(":material/bolt: Found a matching analysis — skipping Gemini entirely")
             note = "Already analyzed with these exact inputs (by you or another user) — 0 Gemini calls spent."
+            # Nothing was regenerated, so there is no title/description to
+            # feed keyword evidence into this run -- the pipeline still runs,
+            # purely to keep the Keywords tab and the tag merge fresh even
+            # though the cached copy's title was written without seeing it.
+            keyword_result = _run_keyword_pipeline(result.get("content_summary", ""))
         else:
-            st.write(":material/auto_awesome: Generating SEO suggestions with Gemini")
             note = ""
+            st.write(":material/travel_explore: Understanding the video")
             try:
-                result = generate_seo(
+                understanding = understand_video(
                     api_keys=GEMINI_API_KEYS,
                     title=meta.title,
                     description=meta.description,
@@ -1209,15 +1495,60 @@ if run:
                     comments=top_comments,
                 )
             except Exception as exc:
+                logger.warning("understand_video failed, generating without keyword evidence: %s", exc)
+                understanding = VideoUnderstanding()
+
+            # Runs BEFORE the main creative call on purpose -- this is the
+            # whole point of the two-phase split. keyword_result now exists
+            # in time to shape the title/description generate_seo is about
+            # to do, instead of only being reconciled into tags afterward.
+            keyword_result = _run_keyword_pipeline(understanding.content_summary)
+            keyword_evidence = None
+            if keyword_result is not None and not keyword_result.weak_evidence:
+                keyword_evidence = format_keyword_evidence(keyword_result.strategy) or None
+
+            st.write(":material/auto_awesome: Generating SEO suggestions with Gemini")
+            try:
+                result = generate_seo(
+                    api_keys=GEMINI_API_KEYS,
+                    title=meta.title,
+                    description=meta.description,
+                    existing_tags=meta.tags,
+                    transcript=transcript,
+                    comments=top_comments,
+                    known_content_summary=understanding.content_summary or None,
+                    keyword_evidence=keyword_evidence,
+                    target_audience=understanding.target_audience or None,
+                )
+            except Exception as exc:
                 status.update(label="Gemini request failed", state="error")
                 st.error(f"LLM request failed: {exc}", icon=":material/error:")
                 st.stop()
+
+            # Folded into result BEFORE the save so it persists with the
+            # analysis -- a cache hit or a history reload then still shows
+            # the audience read, even though phase 1 never re-runs for those.
+            result["target_audience"] = understanding.target_audience
+            result["audience_next_question"] = understanding.audience_next_question
 
             if conn is not None:
                 try:
                     save_analysis(conn, user_name, video_id, meta.title, meta.channel_title, result, fingerprint)
                 except Exception:
                     pass  # history is best-effort, never block the page over it
+
+        # Safety net, both paths: the model saw the keyword evidence as
+        # context on a cache miss, but nothing guarantees it echoed the exact
+        # phrases into the literal tags list, and a cache hit never saw it at
+        # all. Skipped when weak_evidence is set -- those are the closest-
+        # available matches after nothing cleared the normal relevance bar,
+        # and injecting them into the actual tags field would undermine the
+        # floor that exists specifically to keep low-relevance phrases out of
+        # anything presented as a real result.
+        if keyword_result is not None and not keyword_result.weak_evidence:
+            result["tags"] = enforce_tag_char_limit(
+                merge_into_tags(result.get("tags", []), keyword_result.strategy)
+            )
 
         status.update(label="Analysis complete", state="complete", expanded=False)
 
@@ -1228,7 +1559,7 @@ if run:
         "meta": meta, "result": result, "top_comments": top_comments,
         "competitors": competitors, "include_competitors": include_competitors,
         "transcript_segments": transcript_segments, "transcript_text": transcript,
-        "note": note,
+        "note": note, "keyword_result": keyword_result,
     }
     st.session_state.pop("thumbnail_review", None)
 
@@ -1336,6 +1667,7 @@ elif st.session_state.get("current_analysis"):
         readability=readability,
         variants=data.get("variants"),
         checklist=checklist,
+        keyword_result=data.get("keyword_result"),
     )
 
 else:

@@ -18,8 +18,10 @@ def video(lines, total=600.0):
 
 
 def test_no_signals_produces_no_actions():
+    # 4 hashtags: within the real recommended range (3-5) -- 12 used to pass
+    # here too, back when the health rule wrongly targeted 10-15.
     _, rules = compute_health_score(
-        "short", "x" * 300 + " https://instagram.com/me", ["a"] * 40, [f"#{i}" for i in range(12)]
+        "short", "x" * 300 + " https://instagram.com/me", ["a"] * 40, [f"#{i}" for i in range(4)]
     )
     actions = build_playbook(rules)
     assert actions == []

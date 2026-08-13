@@ -1,14 +1,28 @@
 import re
 from dataclasses import dataclass
 
+# Real YouTube-enforced limits. Exceeding these breaks the upload or, for
+# hashtags specifically, makes YouTube silently discard ALL of them -- not
+# just the excess.
 TITLE_MAX = 100
 DESCRIPTION_MAX = 5000
 TAGS_MAX = 500
 HASHTAGS_MAX = 15
 
+# This app's own recommendations, not YouTube rules. Distinguished from the
+# hard limits above on purpose -- compute_health_score below scores against
+# both, and conflating the two means a user can't tell "you'll break your
+# upload" from "we think this is good practice."
 DESCRIPTION_MIN_RECOMMENDED = 200
 MIN_TAG_COUNT_RECOMMENDED = 35
-HASHTAGS_MIN_RECOMMENDED = 10
+# 3-5 is the actual current best practice: YouTube only ever displays the
+# first 3 hashtags (above the title), and creators who stuff more than a
+# handful risk being read as spam. The old value here (10) rewarded hashtag
+# stuffing, scored against best practice rather than for it, and nothing in
+# llm.py's prompt even aimed for that count in the first place -- checked
+# and corrected together.
+HASHTAGS_MIN_RECOMMENDED = 3
+HASHTAGS_MAX_RECOMMENDED = 5
 
 _SOCIAL_LINK_PATTERN = re.compile(
     r"(https?://\S+|@\w+|(?:instagram|twitter|x|tiktok|discord|facebook)\.com/\S+)",
@@ -54,9 +68,13 @@ class HealthRule:
 
 
 def compute_health_score(title: str, description: str, tags: list[str], hashtags: list[str]) -> tuple[int, list[HealthRule]]:
-    """0-100 compliance score against YouTube best practices (not just hard
-    limits) -- title/description/tag length, tag count, hashtag range, and
-    whether the description points viewers to a social/community link."""
+    """0-100 score across 7 rules. Not all 7 are the same kind of claim:
+    title/description/tag-char limits are real YouTube constraints (using
+    TITLE_MAX/DESCRIPTION_MAX/TAGS_MAX); tag COUNT and hashtag range are this
+    app's own heuristics (MIN_TAG_COUNT_RECOMMENDED, HASHTAGS_MIN/MAX_
+    RECOMMENDED) with no YouTube rule behind them. Scored on equal footing
+    here for a single 0-100 number, but don't read every rule as "YouTube
+    says so" -- two of them are this app's opinion."""
     rules = [
         HealthRule(
             "Title within 100 characters",
@@ -84,8 +102,8 @@ def compute_health_score(title: str, description: str, tags: list[str], hashtags
             f"{len(', '.join(tags))}/{TAGS_MAX} characters",
         ),
         HealthRule(
-            f"{HASHTAGS_MIN_RECOMMENDED}-{HASHTAGS_MAX} hashtags",
-            HASHTAGS_MIN_RECOMMENDED <= len(hashtags) <= HASHTAGS_MAX,
+            f"{HASHTAGS_MIN_RECOMMENDED}-{HASHTAGS_MAX_RECOMMENDED} hashtags",
+            HASHTAGS_MIN_RECOMMENDED <= len(hashtags) <= HASHTAGS_MAX_RECOMMENDED,
             f"{len(hashtags)} hashtags",
         ),
         HealthRule(

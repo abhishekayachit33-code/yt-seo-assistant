@@ -5,3 +5,18 @@ __pycache__/
 .agents/
 .claude/
 .DS_Store
+.pytest_cache/
+
+# YouTube Studio analytics exports. These contain a real channel's private
+# per-video performance data (views, impressions, CTR) belonging to someone
+# else. Both this repo and the Docker image built from it are PUBLIC, so
+# these must never be committed -- they were used locally to validate the
+# keyword pipeline and have no place in the shipped artifact.
+Content */
+Geography */
+Traffic source */
+*.csv
+
+# Local screenshots / scratch
+Screenshot *.png
+screenshots

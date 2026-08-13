@@ -5,3 +5,24 @@ __pycache__/
 *.pyc
 .claude/
 .agents/
+.DS_Store
+.pytest_cache/
+
+# Never bake real channel analytics into a publicly-pushed image -- see the
+# matching note in .gitignore. Belt and braces: .gitignore keeps these out of
+# the repo, this keeps them out of the image even when building from a dirty
+# working tree.
+Content */
+Geography */
+Traffic source */
+*.csv
+Screenshot *.png
+screenshots
+
+# Not needed at runtime -- smaller image, and no test fixtures shipped to prod.
+tests/
+conftest.py
+requirements-dev.txt
+handoff.md
+project-brief.md
+*.md
