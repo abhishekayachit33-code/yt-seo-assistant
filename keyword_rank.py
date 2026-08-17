@@ -426,7 +426,11 @@ def assess_confidence(lanes_used: list[str], candidate_count: int) -> tuple[str,
     if LANE_DEMAND not in lanes_used:
         missing.append("no YouTube search suggestions (endpoint unavailable)")
     if LANE_SUPPLY not in lanes_used:
-        missing.append("no transcript")
+        # Covers two different causes (no transcript given, or one given but
+        # with no reusable phrase in it) with one honest label -- "no
+        # transcript" specifically was wrong in the second case and read as
+        # "you forgot to paste one" when the user hadn't.
+        missing.append("no reusable phrases from the transcript/script")
     if LANE_COMPETITOR not in lanes_used:
         missing.append("competitor comparison was off")
 

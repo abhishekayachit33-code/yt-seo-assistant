@@ -190,9 +190,16 @@ def run(
     # --- supply lane (transcript n-grams) ---
     supply_phrases: list[str] = []
     if transcript:
+        # count > 1 assumes a full video transcript, where natural repetition
+        # is normal. A short planning-mode draft (a few hundred words) rarely
+        # repeats any specific 2-3 word phrase twice, so that bar would zero
+        # out the lane on real input. Below ~500 words, one occurrence is
+        # legitimate supply evidence.
+        word_count = len(re.findall(r"\S+", transcript))
+        min_count = 1 if word_count < 500 else 2
         for n in (3, 2):
             supply_phrases.extend(
-                phrase for phrase, count in top_ngrams(transcript, n, 25) if count > 1
+                phrase for phrase, count in top_ngrams(transcript, n, 25) if count >= min_count
             )
         if supply_phrases:
             lanes_used.append(LANE_SUPPLY)

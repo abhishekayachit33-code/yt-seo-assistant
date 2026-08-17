@@ -108,6 +108,23 @@ def test_run_with_no_evidence_at_all_returns_empty_not_a_crash(mock_collect):
     assert result.candidate_count == 0
 
 
+@patch("keyword_pipeline.autocomplete.collect")
+def test_short_draft_script_with_a_phrase_used_once_still_counts_as_supply(mock_collect):
+    # A real bug report: planning mode pastes a short draft script (a few
+    # hundred words), no phrase in it repeats twice, and the old count > 1
+    # threshold -- calibrated for a full video transcript -- zeroed out the
+    # supply lane on real input, surfacing a misleading "no transcript"
+    # message even though one was pasted.
+    mock_collect.return_value = []
+    short_script = (
+        "Today I want to explain the aps certificate process for germany. "
+        "It's a document every Indian student needs before studying abroad."
+    )
+    assert len(short_script.split()) < 500
+    result = run([], SUMMARY, TITLE, "desc", transcript=short_script, use_llm_judge=False)
+    assert LANE_SUPPLY in result.lanes_used
+
+
 @patch("keyword_pipeline.judge_keywords")
 @patch("keyword_pipeline.autocomplete.collect")
 def test_llm_judge_drops_rejected_candidates(mock_collect, mock_judge):
