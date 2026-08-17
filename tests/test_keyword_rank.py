@@ -275,6 +275,15 @@ def test_confidence_reason_names_what_was_missing():
     assert "competitor" in reason.lower()
 
 
+def test_missing_supply_lane_does_not_say_no_transcript():
+    # A transcript can be present but yield no reusable phrase (a short
+    # planning-mode script); "no transcript" was misleading in that case,
+    # reading as "you forgot to paste one" when the user hadn't.
+    _, reason = assess_confidence([LANE_DEMAND, LANE_COMPETITOR], 30)
+    assert "no transcript" not in reason.lower()
+    assert "reusable phrases" in reason.lower()
+
+
 # ---------------------------------------------------------- tags/keywords merge
 
 
