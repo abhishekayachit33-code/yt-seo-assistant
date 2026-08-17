@@ -1145,10 +1145,16 @@ run_plan = False
 run_keyword_pipeline = False
 
 if mode == "Plan a new video":
-    st.caption("No video needed yet — draft a title, description, and script, and get the same SEO guidance.")
+    st.caption("No video needed yet — paste your script and get titles, description, tags, and SEO guidance.")
     with st.form("plan", border=False):
+        plan_script = st.text_area(
+            "Draft script or transcript", placeholder="Paste your script or talking points...",
+            height=160,
+            help="Used for hook analysis, keyword density, and as the basis for the titles Gemini proposes. Chapters are never generated here, since there's no real video duration to base timestamps on.",
+        )
         plan_title = st.text_input(
-            "Working title", placeholder="Working title for the video",
+            "Working title (optional)",
+            placeholder="Leave blank to let Gemini propose a title from your script",
             icon=":material/title:",
         )
         plan_description = st.text_area(
@@ -1158,11 +1164,6 @@ if mode == "Plan a new video":
         plan_tags = st.text_input(
             "Draft tags (optional, comma-separated)", placeholder="tag one, tag two, tag three",
             icon=":material/sell:",
-        )
-        plan_script = st.text_area(
-            "Draft script or transcript (optional)", placeholder="Paste your script or talking points...",
-            height=160,
-            help="Used for hook analysis and keyword density. Chapters are never generated here, since there's no real video duration to base timestamps on.",
         )
         plan_title_variants = st.text_area(
             "Alternative title to compare (optional, one)",
@@ -1220,24 +1221,19 @@ if run_plan:
         st.error("Missing GEMINI_API_KEY. Add it to your .env file.", icon=":material/key_off:")
         st.stop()
 
-    if not plan_title.strip():
-        st.warning("Enter a working title first.", icon=":material/edit_off:")
-        st.stop()
-
     plan_tags_list = [t.strip() for t in plan_tags.split(",") if t.strip()]
 
     # Hard refusal, not graceful degradation. Everything downstream -- seeds,
-    # autocomplete, audience -- is derived from what's typed here. Too little
-    # input doesn't produce a slightly worse plan, it produces a confident
-    # plan about nothing, which is worse than no plan at all. The analyze
-    # path can degrade gracefully because it always has real video metadata
-    # to fall back on; this path has only what the user typed.
-    if not is_plan_input_sufficient(plan_title, plan_description, plan_script, plan_tags_list):
+    # autocomplete, audience, the titles Gemini proposes -- is derived from
+    # the script. A title/description/tags typed without one is not enough
+    # to research real search demand or judge who this is for; a script
+    # alone is. The analyze path can degrade gracefully because it always
+    # has real video metadata to fall back on; this path has only the script.
+    if not is_plan_input_sufficient(plan_script):
         st.error(
-            "Not enough to plan from. A working title alone isn't enough to research real "
-            "search demand or judge who this is for — the result would be confident guesswork.\n\n"
-            "Add **at least one** of: a more specific title (4+ meaningful words naming the "
-            "actual topic), a draft description, a draft script, or draft tags.",
+            "Paste a script or transcript first. Everything else on this form -- title, "
+            "description, tags -- is optional; the script is what search demand, audience, "
+            "and the proposed titles are built from.",
             icon=":material/edit_off:",
         )
         st.stop()
@@ -1313,6 +1309,13 @@ if run_plan:
             status.update(label="Gemini request failed", state="error")
             st.error(f"LLM request failed: {exc}", icon=":material/error:")
             st.stop()
+
+        # No working title was typed -- use Gemini's own top pick so the
+        # hero, history, and fingerprint have something real instead of a
+        # blank string. Doesn't touch result["titles"]; the full list still
+        # renders as suggestions same as when a working title was given.
+        if not meta.title.strip() and result.get("titles"):
+            meta.title = result["titles"][0]
 
         result["target_audience"] = understanding.target_audience
         result["audience_next_question"] = understanding.audience_next_question
