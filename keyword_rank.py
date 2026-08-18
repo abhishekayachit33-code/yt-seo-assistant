@@ -454,11 +454,50 @@ class KeywordStrategy:
         return ([self.primary] if self.primary else []) + self.secondary + self.long_tail
 
 
-def assess_confidence(lanes_used: list[str], candidate_count: int) -> tuple[str, str]:
-    """Confidence reflects which evidence lanes actually fired, so a result
-    built on one degraded source never looks as authoritative as one built on
-    three. The app degrades gracefully everywhere else; without this, that
-    degradation is invisible to the person reading the output."""
+# A lane can fire and still carry nothing usable. These are the bars for
+# "this lane actually contributed", as opposed to "this lane ran".
+#
+# The relevance bar sits meaningfully above RELEVANCE_FLOOR rather than at it:
+# clearing the floor means a keyword is not noise, which is a much weaker
+# claim than the word "high confidence" makes to a reader. Measured on a
+# realistic pool, genuinely on-topic keywords sat around 0.27 and the best
+# ones at 0.4-0.55, so a set whose median only just clears the floor is thin
+# regardless of how many lanes reported in.
+CONFIDENT_RELEVANCE_MEDIAN = 0.30
+CONFIDENT_KEYWORD_COUNT = 20
+
+
+def _median(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2
+
+
+def assess_confidence(
+    lanes_used: list[str],
+    candidate_count: int,
+    ranked: list[ScoredKeyword] | None = None,
+) -> tuple[str, str]:
+    """Confidence reflects which evidence lanes actually fired AND whether what
+    they returned is worth anything. The app degrades gracefully everywhere
+    else; without this, that degradation is invisible to the person reading
+    the output.
+
+    Lane presence alone used to decide this, which let the badge read "high"
+    on a result where no keyword had an autocomplete position and every
+    competitor signal had been discarded as below-consensus -- the reason
+    string still announced it was "built from search demand ... and competing
+    videos". Firing is not contributing, and the two must not look the same to
+    someone deciding whether to act on this.
+
+    `ranked` is optional so the lane-only assessment still works for callers
+    that have no scored keywords yet; when supplied, it can only ever LOWER
+    the verdict, never raise it.
+    """
     missing = []
     if LANE_DEMAND not in lanes_used:
         missing.append("no YouTube search suggestions (endpoint unavailable)")
@@ -471,11 +510,34 @@ def assess_confidence(lanes_used: list[str], candidate_count: int) -> tuple[str,
     if LANE_COMPETITOR not in lanes_used:
         missing.append("competitor comparison was off")
 
-    if not missing and candidate_count >= 20:
+    # Quality checks. These describe lanes that RAN but returned nothing the
+    # ranker could use, which the "missing" list above cannot see.
+    weak = []
+    if ranked:
+        if LANE_DEMAND in lanes_used and not any(
+            k.candidate.autocomplete_rank is not None for k in ranked
+        ):
+            weak.append("no keyword actually appeared in YouTube's suggestions")
+        if LANE_COMPETITOR in lanes_used and not any(
+            k.candidate.competitor_hits >= COMPETITOR_CONSENSUS_MIN for k in ranked
+        ):
+            weak.append(
+                f"no phrase was used by {COMPETITOR_CONSENSUS_MIN}+ competitors, "
+                "so the competitor signal was discarded"
+            )
+        median_relevance = _median([k.candidate.relevance for k in ranked])
+        if median_relevance < CONFIDENT_RELEVANCE_MEDIAN:
+            weak.append(
+                "the keywords found are only loosely related to this video "
+                f"(median relevance {median_relevance:.2f})"
+            )
+
+    problems = missing + weak
+    if not problems and candidate_count >= CONFIDENT_KEYWORD_COUNT:
         return "high", "Built from search demand, your transcript, and competing videos."
-    if len(missing) >= 2 or candidate_count < 10:
-        return "low", "Limited evidence: " + "; ".join(missing) + "."
-    return "medium", "Partial evidence: " + "; ".join(missing) + "."
+    if len(problems) >= 2 or candidate_count < 10:
+        return "low", "Limited evidence: " + "; ".join(problems) + "."
+    return "medium", "Partial evidence: " + "; ".join(problems) + "."
 
 
 def build_strategy(ranked: list[ScoredKeyword], lanes_used: list[str]) -> KeywordStrategy:
@@ -486,7 +548,7 @@ def build_strategy(ranked: list[ScoredKeyword], lanes_used: list[str]) -> Keywor
     phrases legitimately rank lower on broad-appeal signals like autocomplete
     strength while being the most winnable targets available.
     """
-    confidence, reason = assess_confidence(lanes_used, len(ranked))
+    confidence, reason = assess_confidence(lanes_used, len(ranked), ranked)
     if not ranked:
         return KeywordStrategy(None, [], [], lanes_used, confidence, reason)
 
