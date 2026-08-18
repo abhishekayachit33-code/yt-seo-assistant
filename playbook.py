@@ -34,10 +34,10 @@ def build_playbook(
         tag_list = ", ".join(f'"{t}"' for t, _ in top)
         actions.append(
             Action(
-                f"Add {len(top)} keyword{'s' if len(top) != 1 else ''} your competitors are winning with",
-                f"{tag_list} — ranked by the views sitting behind them on rival videos. "
-                f"Your top competitors average {gap.competitor_average_views:,} views; "
-                f"these are the tags most likely explaining part of that gap.",
+                f"Add {len(top)} keyword{'s' if len(top) != 1 else ''} your competitors agree on",
+                f"{tag_list} — each used by several competing videos independently, which is "
+                "evidence about this niche's vocabulary rather than one channel's guess. "
+                f"The median competitor sits at {gap.competitor_median_views:,} views.",
                 ":material/swap_horiz:",
             )
         )

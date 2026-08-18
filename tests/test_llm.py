@@ -463,3 +463,89 @@ def test_generate_transcript_from_video_returns_none_on_failure(mock_generate):
     from llm import generate_transcript_from_video
 
     assert generate_transcript_from_video(["k"], "https://www.youtube.com/watch?v=abc123") is None
+
+
+# ------------------------------------------------------- citation grounding
+#
+# The prompt tells the model to cite concrete moments ("At 02:15, you dropped
+# the pacing") and quote real audience themes. Nothing verified either, and a
+# specific cited claim is the most convincing kind of wrong output this app
+# can produce.
+
+
+def _valid_output(**overrides) -> dict:
+    """Deliberately clean on every OTHER rule -- enough tags, inside the 500
+    character cap -- so a grounding assertion of `== []` cannot pass or fail
+    for an unrelated reason."""
+    data = {
+        "tags": [f"tag{i}" for i in range(40)],
+        "chapters": [{"timestamp": "00:00", "title": "Intro"}],
+    }
+    data.update(overrides)
+    return data
+
+
+def test_citation_past_the_end_of_the_video_is_a_violation():
+    data = _valid_output(suggestions=["At 47:15 your pacing drops — add a B-roll cut."])
+    reasons = [v.reason for v in find_output_violations(data, True, duration_seconds=90)]
+    assert any("47:15" in r for r in reasons)
+
+
+def test_citation_inside_the_video_is_fine():
+    data = _valid_output(suggestions=["At 01:02 the hook lands well."])
+    assert find_output_violations(data, True, duration_seconds=90) == []
+
+
+def test_aspect_ratios_are_not_mistaken_for_timestamps():
+    """16:9 would parse as 16m09s and fire on any short video, on the model's
+    own thumbnail advice."""
+    data = _valid_output(suggestions=["Use a 16:9 thumbnail and cut at 00:45."])
+    assert find_output_violations(data, True, duration_seconds=90) == []
+
+
+def test_a_citation_just_past_the_end_is_tolerated():
+    """Rounding up to the end of the video is not hallucination."""
+    data = _valid_output(suggestions=["Wrap up around 01:35."])
+    assert find_output_violations(data, True, duration_seconds=90) == []
+
+
+def test_chapter_past_the_end_of_the_video_is_a_violation():
+    data = _valid_output(chapters=[
+        {"timestamp": "00:00", "title": "Intro"},
+        {"timestamp": "52:00", "title": "End"},
+    ])
+    reasons = [v.reason for v in find_output_violations(data, True, duration_seconds=90)]
+    assert any("52:00" in r for r in reasons)
+
+
+def test_citations_in_hook_analysis_and_shorts_are_checked_too():
+    data = _valid_output(
+        hook_analysis={"verdict": "Weak", "reasoning": "At 30:00 you lose them", "rewrite": ""},
+        shorts_scripts=[{"hook_line": "clip at 44:10", "script": "", "caption": "", "rationale": ""}],
+    )
+    fields = {v.field for v in find_output_violations(data, True, duration_seconds=90)}
+    assert fields == {"hook_analysis", "shorts_scripts"}
+
+
+def test_audience_themes_without_comments_are_flagged_as_invented():
+    data = _valid_output(comment_sentiment={
+        "positive_themes": ["viewers are begging for a part 2"],
+        "negative_themes": [],
+        "summary": "Audience wants more.",
+    })
+    reasons = [v.reason for v in find_output_violations(data, True, has_comments=False)]
+    assert any("no comments" in r for r in reasons)
+
+
+def test_empty_sentiment_without_comments_is_fine():
+    data = _valid_output(comment_sentiment={
+        "positive_themes": [], "negative_themes": [], "summary": "No comments available.",
+    })
+    assert find_output_violations(data, True, has_comments=False) == []
+
+
+def test_grounding_checks_are_skipped_without_timing_data():
+    """Planning mode and Gemini-watched transcripts have no verifiable
+    duration; guessing one would turn a check into a fabrication of its own."""
+    data = _valid_output(suggestions=["At 47:15 your pacing drops."])
+    assert find_output_violations(data, True) == []

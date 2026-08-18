@@ -750,22 +750,42 @@ def render_audience(
                 rivals = len(gap.top_competitors)
                 if gap.gap > 0:
                     st.markdown(
-                        f"Your top {rivals} competitors average "
-                        f"**{gap.competitor_average_views:,} views**. That is an addressable "
+                        f"The median of your top {rivals} competitors is "
+                        f"**{gap.competitor_median_views:,} views**. That is an addressable "
                         f"gap of **~{gap.gap:,} viewers** you are not reaching."
                     )
                 else:
                     st.markdown(
-                        f"You are ahead of your top {rivals} competitors, who average "
-                        f"**{gap.competitor_average_views:,} views**."
+                        f"You are ahead of your top {rivals} competitors, whose median is "
+                        f"**{gap.competitor_median_views:,} views**."
+                    )
+
+                # Disclosed rather than silently dropped: a video this far out
+                # of scale is still genuinely ranking for these words, which is
+                # worth seeing -- it just isn't a peer, and the headline number
+                # would be nonsense if it were averaged in.
+                if gap.has_outliers:
+                    st.caption(
+                        ":material/info: Excluded from that median as out of scale: "
+                        + ", ".join(
+                            f"“{c.title}” ({c.view_count:,} views)" for c in gap.outliers
+                        )
+                        + " — still ranking for your topic, but not a channel of comparable size."
                     )
 
                 if gap.missing_tags:
                     st.markdown(
-                        f"**Add these {len(gap.missing_tags)} tags** — ranked by the views "
-                        "sitting behind them, not how often they appear."
+                        f"**Add these {len(gap.missing_tags)} tags** — ranked by how many "
+                        "competitors independently use each one, not by whoever has the "
+                        "most views."
                     )
-                    chips([f"{t} · {v:,} views" for t, v in gap.missing_tags], "orange")
+                    chips(
+                        [
+                            f"{t} · {n} competitor{'s' if n != 1 else ''}"
+                            for t, n in gap.missing_tags
+                        ],
+                        "orange",
+                    )
                 else:
                     st.caption("No keyword gaps — your tags already cover what competitors rank for.")
 
@@ -1565,6 +1585,14 @@ if run:
                     keyword_evidence=keyword_evidence,
                     target_audience=understanding.target_audience or None,
                     deepseek_api_key=DEEPSEEK_API_KEY,
+                    # Only from real caption timing. transcript_segments is
+                    # None for a Gemini-watched transcript, whose self-reported
+                    # timing this app cannot verify -- passing an invented
+                    # duration would turn a grounding check into a guess.
+                    duration_seconds=(
+                        max(s.start + s.duration for s in transcript_segments)
+                        if transcript_segments else None
+                    ),
                 )
             except Exception as exc:
                 status.update(label="Gemini request failed", state="error")

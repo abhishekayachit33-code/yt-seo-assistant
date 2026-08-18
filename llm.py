@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from dataclasses import dataclass
 
 from google.genai import types
@@ -470,8 +471,42 @@ def _timestamp_to_seconds(ts: str) -> int | None:
     return seconds
 
 
-def find_output_violations(data: dict, has_transcript: bool) -> list[Violation]:
-    """Pure check of the model's output against the brief's hard requirements. No I/O."""
+# Cited timestamps in prose. Seconds are required to be two digits in 00-59 so
+# an aspect ratio ("16:9") or a score line ("3:1") cannot be misread as a time
+# reference -- the false positive would otherwise fire on the model's own
+# thumbnail advice, which routinely says 16:9.
+_CITED_TIMESTAMP_PATTERN = re.compile(r"\b(\d{1,2}):([0-5]\d)\b")
+
+# Tolerance on a cited timestamp before it counts as fabricated. A model
+# rounding "the last few seconds" up past the exact final caption is not
+# hallucinating; pointing at 47:15 of a 90-second video is.
+CITATION_TOLERANCE_SECONDS = 15
+
+
+def _cited_seconds(text: str) -> list[tuple[str, int]]:
+    return [
+        (match.group(0), int(match.group(1)) * 60 + int(match.group(2)))
+        for match in _CITED_TIMESTAMP_PATTERN.finditer(text or "")
+    ]
+
+
+def find_output_violations(
+    data: dict,
+    has_transcript: bool,
+    duration_seconds: float | None = None,
+    has_comments: bool = True,
+) -> list[Violation]:
+    """Pure check of the model's output against the brief's hard requirements. No I/O.
+
+    duration_seconds and has_comments enable grounding checks: the prompt
+    instructs the model to cite concrete moments ("At 02:15, you dropped the
+    pacing") and to quote real audience themes, and nothing verified either.
+    A citation past the end of the video, or an audience finding on a video
+    with no comments, is the most convincing kind of wrong output this app can
+    produce -- specific, cited, and completely invented. Both are optional so
+    callers without timing or comment data keep the previous behaviour rather
+    than getting false violations.
+    """
     violations = []
 
     tags = data.get("tags", [])
@@ -498,6 +533,51 @@ def find_output_violations(data: dict, has_transcript: bool) -> list[Violation]:
             if prev is not None and secs - prev < MIN_CHAPTER_GAP_SECONDS:
                 violations.append(Violation("chapters", f"timestamps too close together near {c.get('timestamp')}"))
             prev = secs
+
+    if duration_seconds:
+        limit = duration_seconds + CITATION_TOLERANCE_SECONDS
+        readable = f"{int(duration_seconds) // 60:02d}:{int(duration_seconds) % 60:02d}"
+
+        for chapter in chapters:
+            secs = _timestamp_to_seconds(chapter.get("timestamp", ""))
+            if secs is not None and secs > limit:
+                violations.append(Violation(
+                    "chapters",
+                    f"chapter at {chapter.get('timestamp')} is past the end of the "
+                    f"video ({readable})",
+                ))
+
+        # The highest-trust-sounding fields, and previously the least checked:
+        # a cited moment reads as verified precisely because it is specific.
+        for field in ("suggestions", "hook_analysis", "shorts_scripts"):
+            value = data.get(field)
+            if isinstance(value, list):
+                text = " ".join(
+                    " ".join(str(v) for v in item.values()) if isinstance(item, dict) else str(item)
+                    for item in value
+                )
+            elif isinstance(value, dict):
+                text = " ".join(str(v) for v in value.values())
+            else:
+                text = str(value or "")
+            for literal, seconds in _cited_seconds(text):
+                if seconds > limit:
+                    violations.append(Violation(
+                        field,
+                        f"cites {literal}, which is past the end of the video ({readable})",
+                    ))
+
+    if not has_comments:
+        sentiment = data.get("comment_sentiment") or {}
+        invented = (
+            (sentiment.get("positive_themes") or [])
+            + (sentiment.get("negative_themes") or [])
+        )
+        if invented:
+            violations.append(Violation(
+                "comment_sentiment",
+                f"reports {len(invented)} audience theme(s) for a video with no comments available",
+            ))
 
     return violations
 
@@ -664,8 +744,16 @@ def generate_seo(
     keyword_evidence: str | None = None,
     target_audience: str | None = None,
     deepseek_api_key: str | None = None,
+    duration_seconds: float | None = None,
 ) -> dict:
-    """known_content_summary: when the caller already ran understand_video()
+    """duration_seconds: the video's real length, from caption timing. Enables
+    the grounding checks in find_output_violations -- a cited moment past the
+    end of the video is fabricated. Left None when there is no timing data
+    (planning mode, or a transcript Gemini produced by watching the video,
+    whose self-reported timing this app cannot verify), in which case those
+    checks are skipped rather than guessed at.
+
+    known_content_summary: when the caller already ran understand_video()
     (phase 1), pass its result here -- this call will use it directly rather
     than asking the model to regenerate it, avoiding drift between the two.
     Planning mode has no phase 1 (nothing to seed a keyword search from yet)
@@ -732,7 +820,12 @@ def generate_seo(
         # discarded anyway.
         data["chapters"] = []
 
-    violations = find_output_violations(data, has_transcript=bool(transcript))
+    violations = find_output_violations(
+        data,
+        has_transcript=bool(transcript),
+        duration_seconds=duration_seconds,
+        has_comments=bool(comments),
+    )
     if violations:
         issues = "; ".join(f"{v.field}: {v.reason}" for v in violations)
         logger.warning("generate_seo: model output violated constraints, attempting repair: %s", issues)

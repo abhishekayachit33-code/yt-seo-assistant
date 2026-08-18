@@ -275,6 +275,61 @@ def test_confidence_reason_names_what_was_missing():
     assert "competitor" in reason.lower()
 
 
+def test_all_lanes_firing_is_not_enough_for_high_confidence():
+    """The badge used to read "high" whenever three lanes reported in, even if
+    none of them returned anything the ranker could use -- and the reason
+    string then claimed it was built from search demand and competing videos."""
+    pool = [
+        _candidate(f"marginal phrase {i}", rank=None, hits=1, relevance=RELEVANCE_FLOOR + 0.005)
+        for i in range(22)
+    ]
+    ranked = rank_keywords(pool, "t", "d")
+    level, reason = assess_confidence(
+        [LANE_DEMAND, LANE_SUPPLY, LANE_COMPETITOR], len(ranked), ranked
+    )
+    assert level == "low"
+    assert "suggestions" in reason
+    assert "competitor" in reason
+    assert "loosely related" in reason
+
+
+def test_strong_evidence_still_reaches_high_confidence():
+    pool = [_candidate(f"real keyword {i}", rank=1, hits=4, relevance=0.55) for i in range(22)]
+    ranked = rank_keywords(pool, "t", "d")
+    level, _ = assess_confidence(
+        [LANE_DEMAND, LANE_SUPPLY, LANE_COMPETITOR], len(ranked), ranked
+    )
+    assert level == "high"
+
+
+def test_demand_lane_without_a_single_suggestion_position_is_called_out():
+    pool = [_candidate(f"phrase {i}", rank=None, hits=4, relevance=0.55) for i in range(22)]
+    ranked = rank_keywords(pool, "t", "d")
+    _, reason = assess_confidence(
+        [LANE_DEMAND, LANE_SUPPLY, LANE_COMPETITOR], len(ranked), ranked
+    )
+    assert "no keyword actually appeared in YouTube's suggestions" in reason
+
+
+def test_competitor_lane_below_consensus_is_called_out():
+    pool = [_candidate(f"phrase {i}", rank=1, hits=1, relevance=0.55) for i in range(22)]
+    ranked = rank_keywords(pool, "t", "d")
+    _, reason = assess_confidence(
+        [LANE_DEMAND, LANE_SUPPLY, LANE_COMPETITOR], len(ranked), ranked
+    )
+    assert "competitors" in reason and "discarded" in reason
+
+
+def test_quality_checks_can_only_lower_confidence_never_raise_it():
+    """Supplying ranked keywords must never turn a lane-starved result into a
+    better one than the lane check alone would have given."""
+    pool = [_candidate(f"real keyword {i}", rank=1, hits=4, relevance=0.9) for i in range(30)]
+    ranked = rank_keywords(pool, "t", "d")
+    lane_only, _ = assess_confidence([LANE_SUPPLY], len(ranked))
+    with_quality, _ = assess_confidence([LANE_SUPPLY], len(ranked), ranked)
+    assert lane_only == with_quality == "low"
+
+
 def test_missing_supply_lane_does_not_say_no_transcript():
     # A transcript can be present but yield no reusable phrase (a short
     # planning-mode script); "no transcript" was misleading in that case,
