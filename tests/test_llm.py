@@ -421,3 +421,45 @@ def test_no_keyword_evidence_means_no_demand_block_in_the_prompt(mock_generate):
     generate_seo(api_keys=["k"], title="t", description="d", existing_tags=[], transcript=None)
     sent = mock_generate.call_args.kwargs["contents"]
     assert "Primary keyword:" not in sent
+
+
+@patch("llm.generate_content_with_fallback")
+def test_generate_transcript_from_video_returns_stripped_text(mock_generate):
+    mock_generate.return_value = MagicMock(text="  hello world, this is the video  \n")
+
+    from llm import generate_transcript_from_video
+
+    result = generate_transcript_from_video(["k"], "https://www.youtube.com/watch?v=abc123")
+
+    assert result == "hello world, this is the video"
+
+
+@patch("llm.generate_content_with_fallback")
+def test_generate_transcript_from_video_sends_the_video_url(mock_generate):
+    mock_generate.return_value = MagicMock(text="content")
+
+    from llm import generate_transcript_from_video
+
+    generate_transcript_from_video(["k"], "https://www.youtube.com/watch?v=abc123")
+
+    contents = mock_generate.call_args.kwargs["contents"]
+    file_uris = [p.file_data.file_uri for p in contents.parts if p.file_data]
+    assert file_uris == ["https://www.youtube.com/watch?v=abc123"]
+
+
+@patch("llm.generate_content_with_fallback")
+def test_generate_transcript_from_video_returns_none_on_empty_response(mock_generate):
+    mock_generate.return_value = MagicMock(text="   ")
+
+    from llm import generate_transcript_from_video
+
+    assert generate_transcript_from_video(["k"], "https://www.youtube.com/watch?v=abc123") is None
+
+
+@patch("llm.generate_content_with_fallback")
+def test_generate_transcript_from_video_returns_none_on_failure(mock_generate):
+    mock_generate.side_effect = Exception("video ingestion failed")
+
+    from llm import generate_transcript_from_video
+
+    assert generate_transcript_from_video(["k"], "https://www.youtube.com/watch?v=abc123") is None

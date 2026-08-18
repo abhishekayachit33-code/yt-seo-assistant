@@ -4,13 +4,55 @@ from dataclasses import dataclass
 
 from google.genai import types
 
+from deepseek_client import generate_json as _deepseek_generate_json
 from gemini_client import generate_content_with_fallback
 from keywords import top_ngrams
 from limits import TAGS_MAX
 
 logger = logging.getLogger(__name__)
 
-MODEL = "gemini-flash-latest"
+MODEL = "gemini-2.5-flash"
+DEEPSEEK_MODEL = "deepseek-v4-flash"
+
+
+class _ProviderResponse:
+    """Duck-types a Gemini SDK response closely enough (`.text`) that every
+    existing call site can stay `json.loads(response.text)` regardless of
+    which provider actually answered."""
+
+    __slots__ = ("text",)
+
+    def __init__(self, text: str):
+        self.text = text
+
+
+def _generate_json(
+    api_keys: list[str], model: str, contents: str,
+    config: types.GenerateContentConfig, deepseek_api_key: str | None = None,
+):
+    """Provider router for one structured-JSON call. DeepSeek (paid, no
+    free-tier daily-quota or overload limits) is tried first when a key is
+    supplied; Gemini's existing multi-key fallback chain is the safety net,
+    not the primary path -- a DeepSeek outage, or simply no key configured,
+    falls straight through to Gemini exactly as before this router existed.
+
+    Vision calls (thumbnail.py) never go through this -- DeepSeek has no
+    vision model -- and call generate_content_with_fallback directly."""
+    if deepseek_api_key:
+        try:
+            text = _deepseek_generate_json(
+                api_key=deepseek_api_key,
+                model=DEEPSEEK_MODEL,
+                system_prompt=config.system_instruction,
+                user_prompt=contents,
+                schema=config.response_schema,
+                temperature=config.temperature if config.temperature is not None else 0.4,
+            )
+            return _ProviderResponse(text)
+        except Exception as exc:
+            logger.warning("deepseek call failed, falling back to gemini: %s", exc)
+
+    return generate_content_with_fallback(api_keys, model=model, contents=contents, config=config)
 
 # Bump this on any change to SYSTEM_PROMPT or SEO_SCHEMA. It feeds the cache
 # fingerprint (cache_key.py), so a prompt/schema edit invalidates every
@@ -288,6 +330,48 @@ class VideoUnderstanding:
     audience_next_question: str = ""
 
 
+def generate_transcript_from_video(api_keys: list[str], video_url: str) -> str | None:
+    """Fallback for when the video has no fetchable captions in any language
+    (transcript.fetch_transcript_segments returned None): asks Gemini to
+    watch the video directly via file_uri and produce the spoken content as
+    flat prose -- deliberately no per-line timestamps, unlike a real
+    transcript. Gemini's own self-reported timing from watching a video is
+    an estimate, not measured caption data, and this app has no way to
+    verify its precision, so it is never presented as if it were real
+    caption timing.
+
+    Callers MUST pass suppress_chapters=True to generate_seo when using this
+    text, same as planning mode's "no real duration to base timestamps on"
+    case -- for the same underlying reason: the timing this path could
+    produce is not trustworthy enough to build chapters against.
+
+    Gemini-only, unlike every other text-generation call in this file --
+    DeepSeek has no video/audio input capability at all, so there is no
+    provider router here.
+
+    Returns None on any failure; the caller degrades exactly like any other
+    caption-less video already does (no chapters/hook/pacing/keyword-supply
+    evidence from a transcript, everything else still runs)."""
+    try:
+        response = generate_content_with_fallback(
+            api_keys,
+            model=MODEL,
+            contents=types.Content(parts=[
+                types.Part(file_data=types.FileData(file_uri=video_url)),
+                types.Part(text=(
+                    "Transcribe everything spoken in this video, in order, as "
+                    "plain prose. No timestamps, no speaker labels, no "
+                    "commentary -- just the spoken words."
+                )),
+            ]),
+        )
+        text = (response.text or "").strip()
+        return text or None
+    except Exception as exc:
+        logger.warning("generate_transcript_from_video: video ingestion failed: %s", exc)
+        return None
+
+
 def understand_video(
     api_keys: list[str],
     title: str,
@@ -295,6 +379,7 @@ def understand_video(
     existing_tags: list[str],
     transcript: str | None,
     comments: list[str] | None = None,
+    deepseek_api_key: str | None = None,
 ) -> VideoUnderstanding:
     """Phase 1 of a two-call flow: one small, cheap call producing the working
     analysis, before the expensive creative call runs.
@@ -317,7 +402,7 @@ def understand_video(
     """
     user_prompt = _build_user_prompt(title, description, existing_tags, transcript, comments)
     try:
-        response = generate_content_with_fallback(
+        response = _generate_json(
             api_keys,
             model=MODEL,
             contents=user_prompt,
@@ -327,6 +412,7 @@ def understand_video(
                 response_schema=_UNDERSTAND_SCHEMA,
                 temperature=0.3,
             ),
+            deepseek_api_key=deepseek_api_key,
         )
         data = json.loads(response.text)
         return VideoUnderstanding(
@@ -425,7 +511,10 @@ _JUDGE_SCHEMA = {
 }
 
 
-def judge_keywords(api_keys: list[str], content_summary: str, phrases: list[str]) -> dict[str, dict]:
+def judge_keywords(
+    api_keys: list[str], content_summary: str, phrases: list[str],
+    deepseek_api_key: str | None = None,
+) -> dict[str, dict]:
     """One Gemini call that returns per-phrase FEATURES, never an ordering.
 
     Ranking deliberately stays in keyword_rank.py: a model asked to sort a
@@ -446,7 +535,7 @@ def judge_keywords(api_keys: list[str], content_summary: str, phrases: list[str]
         f"Candidate phrases ({len(phrases)}):\n{numbered}"
     )
     try:
-        response = generate_content_with_fallback(
+        response = _generate_json(
             api_keys,
             model=MODEL,
             contents=user_prompt,
@@ -456,6 +545,7 @@ def judge_keywords(api_keys: list[str], content_summary: str, phrases: list[str]
                 response_schema=_JUDGE_SCHEMA,
                 temperature=0.2,  # classification, not creativity
             ),
+            deepseek_api_key=deepseek_api_key,
         )
         data = json.loads(response.text)
     except Exception as exc:
@@ -492,7 +582,10 @@ def enforce_tag_char_limit(tags: list[str], max_chars: int = TAGS_MAX) -> list[s
     return kept
 
 
-def repair_output(api_keys: list[str], data: dict, violations: list[Violation]) -> dict:
+def repair_output(
+    api_keys: list[str], data: dict, violations: list[Violation],
+    deepseek_api_key: str | None = None,
+) -> dict:
     """One follow-up call asking the model to fix only what's wrong. Makes a network call."""
     issues = "; ".join(f"{v.field}: {v.reason}" for v in violations)
     repair_prompt = (
@@ -502,7 +595,7 @@ def repair_output(api_keys: list[str], data: dict, violations: list[Violation]) 
         "issues. Keep everything else the same.\n\n"
         f"Previous response:\n{json.dumps(data)}"
     )
-    response = generate_content_with_fallback(
+    response = _generate_json(
         api_keys,
         model=MODEL,
         contents=repair_prompt,
@@ -512,6 +605,7 @@ def repair_output(api_keys: list[str], data: dict, violations: list[Violation]) 
             response_schema=SEO_SCHEMA,
             temperature=0.4,
         ),
+        deepseek_api_key=deepseek_api_key,
     )
     return json.loads(response.text)
 
@@ -534,6 +628,7 @@ def generate_seo(
     known_content_summary: str | None = None,
     keyword_evidence: str | None = None,
     target_audience: str | None = None,
+    deepseek_api_key: str | None = None,
 ) -> dict:
     """known_content_summary: when the caller already ran understand_video()
     (phase 1), pass its result here -- this call will use it directly rather
@@ -557,7 +652,7 @@ def generate_seo(
     )
     system_prompt = SYSTEM_PROMPT + _PLANNING_CHAPTER_OVERRIDE if suppress_chapters else SYSTEM_PROMPT
 
-    response = generate_content_with_fallback(
+    response = _generate_json(
         api_keys,
         model=MODEL,
         contents=user_prompt,
@@ -567,6 +662,7 @@ def generate_seo(
             response_schema=SEO_SCHEMA,
             temperature=0.4,
         ),
+        deepseek_api_key=deepseek_api_key,
     )
 
     try:
@@ -606,7 +702,7 @@ def generate_seo(
         issues = "; ".join(f"{v.field}: {v.reason}" for v in violations)
         logger.warning("generate_seo: model output violated constraints, attempting repair: %s", issues)
         try:
-            data = repair_output(api_keys, data, violations)
+            data = repair_output(api_keys, data, violations, deepseek_api_key=deepseek_api_key)
             data.setdefault("tags", [])
         except Exception as exc:
             # Repair is best-effort -- keep the original (still-violating)

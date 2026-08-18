@@ -18,7 +18,10 @@ import keyword_pipeline
 from keyword_rank import content_gaps, format_keyword_evidence, merge_into_tags
 from keywords import estimate_spoken_length, top_ngrams
 from limits import check_limits, compute_health_score, extract_hashtags
-from llm import VideoUnderstanding, enforce_tag_char_limit, generate_seo, understand_video
+from llm import (
+    VideoUnderstanding, enforce_tag_char_limit, generate_seo, generate_transcript_from_video,
+    understand_video,
+)
 from pacing import SILENT_GAP_THRESHOLD_SECONDS, find_silent_gaps, words_per_minute_blocks
 from plan_input import is_plan_input_sufficient
 from playbook import build_playbook, build_preproduction_checklist
@@ -38,6 +41,10 @@ logger = logging.getLogger(__name__)
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_API_KEYS = [k for k in [GEMINI_API_KEY, os.getenv("GEMINI_API_KEY_2")] if k]
+# Paid, no free-tier daily-quota/overload limits -- tried before Gemini on
+# every text generation call (never vision, DeepSeek has no vision model).
+# None when unset, which every call site treats as "stay on Gemini only".
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
 
 st.set_page_config(
@@ -1264,6 +1271,7 @@ if run_plan:
                 existing_tags=meta.tags,
                 transcript=plan_script_text,
                 comments=[],
+                deepseek_api_key=DEEPSEEK_API_KEY,
             )
         except Exception as exc:
             logger.warning("understand_video failed in planning mode: %s", exc)
@@ -1282,6 +1290,7 @@ if run_plan:
                     transcript=plan_script_text,
                     competitors=competitors,
                     planning=True,
+                    deepseek_api_key=DEEPSEEK_API_KEY,
                 )
             except Exception as exc:
                 logger.warning("keyword pipeline failed in planning mode: %s", exc)
@@ -1304,6 +1313,7 @@ if run_plan:
                 known_content_summary=understanding.content_summary or None,
                 keyword_evidence=keyword_evidence,
                 target_audience=understanding.target_audience or None,
+                deepseek_api_key=DEEPSEEK_API_KEY,
             )
         except Exception as exc:
             status.update(label="Gemini request failed", state="error")
@@ -1346,6 +1356,7 @@ if run_plan:
                     known_content_summary=understanding.content_summary or None,
                     keyword_evidence=keyword_evidence,
                     target_audience=understanding.target_audience or None,
+                    deepseek_api_key=DEEPSEEK_API_KEY,
                 )
             except Exception:
                 continue  # one variant failing is not worth aborting the whole plan
@@ -1425,6 +1436,17 @@ if run:
         st.write(":material/subtitles: Fetching transcript")
         transcript_segments = fetch_transcript_segments(video_id)
         transcript = segments_to_text(transcript_segments) if transcript_segments else None
+        transcript_is_generated = False
+        if not transcript and GEMINI_API_KEYS:
+            # No captions in any language -- ask Gemini to watch the video
+            # directly instead of giving up. transcript_segments stays None
+            # (no real per-line timing exists), so pacing/silent-gap/CTA
+            # features degrade exactly like any other caption-less video;
+            # only the flat transcript text and the keyword supply lane gain
+            # anything here.
+            st.write(":material/movie: No captions found — asking Gemini to watch the video")
+            transcript = generate_transcript_from_video(GEMINI_API_KEYS, f"https://www.youtube.com/watch?v={video_id}")
+            transcript_is_generated = transcript is not None
         if not transcript:
             st.write(":material/warning: No transcript — chapters, hook, keywords, and pacing will be limited")
 
@@ -1465,6 +1487,7 @@ if run:
                     transcript=transcript,
                     transcript_segments=transcript_segments,
                     competitors=competitors,
+                    deepseek_api_key=DEEPSEEK_API_KEY,
                 )
             except Exception as exc:
                 # Same best-effort contract as every other secondary feature:
@@ -1496,6 +1519,7 @@ if run:
                     existing_tags=meta.tags,
                     transcript=transcript,
                     comments=top_comments,
+                    deepseek_api_key=DEEPSEEK_API_KEY,
                 )
             except Exception as exc:
                 logger.warning("understand_video failed, generating without keyword evidence: %s", exc)
@@ -1519,9 +1543,11 @@ if run:
                     existing_tags=meta.tags,
                     transcript=transcript,
                     comments=top_comments,
+                    suppress_chapters=transcript_is_generated,
                     known_content_summary=understanding.content_summary or None,
                     keyword_evidence=keyword_evidence,
                     target_audience=understanding.target_audience or None,
+                    deepseek_api_key=DEEPSEEK_API_KEY,
                 )
             except Exception as exc:
                 status.update(label="Gemini request failed", state="error")
