@@ -7,41 +7,53 @@ the "Act on this first" section is not optional.
 
 ## 0. Act on this first
 
-**Minikube/Docker/Jenkins/ngrok are all down right now** (confirmed live
-while updating this doc — Docker daemon socket gone, `kubectl` refuses to
-connect, Jenkins 000, ngrok's local API unreachable). Same recurring failure
-mode as always: none of these auto-start, and they go down every time this
-laptop sleeps or reboots. To recover, in order:
-`open -a Docker` and wait for `docker info` to succeed, `minikube start`,
-start Jenkins as a foreground process — **use the Homebrew JDK, not the
-system `java` stub**:
+**Infra recovery is now mostly automated — read this before manually running
+any of the old recovery commands.** As of this session, three `launchd` user
+agents exist and Docker Desktop is a registered login item:
+
+| What | Mechanism | Auto-restarts on |
+|---|---|---|
+| Docker Desktop | macOS login item (`osascript`, not just its own `AutoStart` setting — that alone did NOT register a real login item, see §5) | login |
+| Jenkins | `~/Library/LaunchAgents/com.ytseo.jenkins.plist`, `KeepAlive` | login + crash |
+| ngrok | `~/Library/LaunchAgents/com.ytseo.ngrok.plist`, `KeepAlive` | login + crash |
+| Minikube | `~/Library/LaunchAgents/com.ytseo.minikube-autostart.plist`, single-shot, waits for Docker then runs `minikube start` (`~/Library/Scripts/ytseo-minikube-autostart.sh`) | login only, not crash |
+
+Logs: `~/Library/Logs/ytseo-{jenkins,ngrok,minikube}.log`. All three were
+verified live this session, including surviving a real reboot mid-session.
+
+**If something's still down despite this**, check `launchctl list | grep
+ytseo` first — PIDs present means the agent thinks it's running; check the
+log if a service still isn't reachable. Manual recovery (only if an agent is
+genuinely missing/unloaded):
 ```bash
-nohup /opt/homebrew/opt/openjdk@21/bin/java -jar \
-  /opt/homebrew/Cellar/jenkins-lts/2.568.1/libexec/jenkins.war --httpPort=8080 &
+launchctl load ~/Library/LaunchAgents/com.ytseo.jenkins.plist
+launchctl load ~/Library/LaunchAgents/com.ytseo.ngrok.plist
+launchctl load ~/Library/LaunchAgents/com.ytseo.minikube-autostart.plist
 ```
-(`/usr/bin/java` on this Mac has no real JDK behind it and fails silently —
-see §5.) Then start `ngrok http 8080`, then check whether the GitHub webhook
-URL still matches the ngrok tunnel (it rotates on every restart on the free
-tier) — `gh api repos/abhishekayachit33-code/yt-seo-assistant/hooks` shows
-the current registered URL, `curl localhost:4040/api/tunnels` shows the
-current one.
+ngrok's tunnel URL has stayed **identical** across every restart observed
+this session (`detection-joyfully-antibody.ngrok-free.dev`) despite no
+static-domain config in `ngrok.yml` — this account most likely has ngrok's
+one free reserved domain claimed on it. The old "URL rotates every restart,
+recheck the webhook" advice may no longer apply; verify with
+`gh api repos/abhishekayachit33-code/yt-seo-assistant/hooks --jq '.[].config.url'`
+vs `curl localhost:4040/api/tunnels` before assuming either way.
 
-**There is substantial uncommitted local work, larger than last time.**
-Last pushed commit is `a98cd43` ("Retry Gemini calls with backoff before
-switching keys, log every attempt"). On top of that, uncommitted:
-- A full **DeepSeek integration** (`deepseek_client.py`, new) — DeepSeek is
-  now tried BEFORE Gemini on every text-generation call, not just a
-  fallback. See §8.
-- **Two transcript fixes** in `transcript.py` and a new Gemini-video-watch
-  fallback in `llm.py` (`generate_transcript_from_video`). See §9.
-- **`llm.py`'s `MODEL` constant is currently `"gemini-2.5-flash"`**, changed
-  from `"gemini-flash-latest"` as a live experiment (§9 explains why, and
-  that this directly contradicts an old warning further down this doc that
-  was never removed — resolve that contradiction before shipping this).
+**Everything that was uncommitted as of the last version of this doc has now
+been pushed** (commits `2d3e2b0` through `cd99a3c` on top of `a98cd43`) —
+DeepSeek integration, the transcript timestamp bug (the real one, see below),
+transcript language fallback, Gemini video-watch fallback, and the
+`gemini-2.5-flash` `MODEL` experiment all shipped. Check `git log --oneline
+-10` and `git status` on resume regardless — this doc drifts the moment new
+work starts.
 
-None of it has been pushed. Check `git status` before assuming the working
-tree matches what's deployed. Run `pytest -q` (280 tests as of this writing)
-before pushing anything — it's green on the current working tree.
+**One thing to know about the timestamp fix specifically**: an earlier
+session pass diagnosed the bug correctly, said "fixed," but only fixed a
+*different*, unrelated bug (transcript language fallback) — the actual fix
+(`keywords.py`'s `_TIMESTAMP_PATTERN` missing `re.MULTILINE`) wasn't applied
+until the user caught it live (`"08 01" still showing up in keyword density,
+even after the fix"`). Worth remembering when trusting any past "fixed"
+claim in a doc like this one — verify against the actual diff, not the
+stated intent.
 
 ---
 
@@ -140,13 +152,10 @@ kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.pas
 # use 15432 to avoid the conflict, this bit everyone all session)
 kubectl port-forward -n yt-seo svc/postgres 15432:5432 &
 
-# Jenkins -- foreground, correct JDK (see §0 and §5)
-nohup /opt/homebrew/opt/openjdk@21/bin/java -jar \
-  /opt/homebrew/Cellar/jenkins-lts/2.568.1/libexec/jenkins.war --httpPort=8080 &
-
-# ngrok -- separate terminal, needs the user to run it (auto-mode blocks
-# starting it directly since it exposes a local port publicly)
-ngrok http 8080
+# Jenkins and ngrok are now launchd-managed (see §0) -- should already be
+# running. Only needed if `launchctl list | grep ytseo` shows them missing:
+launchctl load ~/Library/LaunchAgents/com.ytseo.jenkins.plist
+launchctl load ~/Library/LaunchAgents/com.ytseo.ngrok.plist
 ```
 
 Local Python dev:
@@ -191,7 +200,7 @@ docker compose down
   connection-refused, check `docker info` first, then `minikube status`.
   `open -a Docker` restarts the daemon; Minikube needs an explicit
   `minikube start` after. This is the single most common time-waster across
-  every session on this project — always run the §10 health check first.
+  every session on this project — always run the §11 health check first.
 - **Gemini free tier is 20 requests/day, per key, per model.** This bit hard
   this session: heavy live testing exhausted both `GEMINI_API_KEY` and
   `GEMINI_API_KEY_2` on `gemini-flash-latest` (which currently resolves to
@@ -208,11 +217,13 @@ docker compose down
   newer accounts) and told future sessions never to hardcode it again.
   Live-tested this session anyway (separate quota bucket, see above) and it
   **worked cleanly**, both a raw smoke test and a real `understand_video()`
-  call through the actual pipeline. `llm.py:MODEL` is currently set to it as
-  an uncommitted experiment (§0). Before shipping this: figure out why the
-  old warning doesn't match observed behavior — different account tier?
-  deprecation not actually enforced yet? — rather than trusting either the
-  old note or the one successful test blindly.
+  call through the actual pipeline. `llm.py:MODEL` is now set to it and
+  **has been pushed** — this contradiction was never actually resolved,
+  just shipped anyway on the strength of the live test. Before trusting it
+  long-term: figure out why the old warning doesn't match observed
+  behavior — different account tier? deprecation not actually enforced
+  yet? — rather than assuming either the old note or the one successful
+  test is the full picture.
 - **429 vs 503 look similar but mean different things, and retries can make
   429 worse.** 503 ("high demand") is transient Google-side overload, worth
   a short backoff retry. 429 ("quota exceeded") on the free tier's *daily*
@@ -244,6 +255,34 @@ docker compose down
 - **Streamlit TOML secrets need actual quotes.** `KEY = "value"`, not
   `.env`-style `KEY=value` — the Community Cloud secrets box rejects the
   latter. Same for Postgres connection strings.
+- **`launchd` agents run with a minimal `PATH`** — no `/usr/local/bin`, no
+  `/opt/homebrew/bin`. The Minikube auto-start script (§0) failed with
+  `PROVIDER_DOCKER_NOT_FOUND` the first time even though its own `docker
+  info` pre-check passed, because `minikube` internally shells out to
+  `docker` by bare name using its own `PATH`. Fixed by exporting a full
+  `PATH` at the top of the script. Same caution applies to any future
+  `launchd`-triggered script that calls out to Homebrew-installed tools.
+- **Docker Desktop's own `AutoStart` flag in `settings-store.json` is not
+  the same as a macOS login item.** Flipping that JSON flag while the app
+  wasn't running did NOT make Docker launch at login — confirmed live after
+  an actual reboot, Docker simply wasn't in `osascript`'s login-item list.
+  Had to register it properly: `osascript -e 'tell application "System
+  Events" to make login item at end with properties {path:"/Applications/
+  Docker.app", hidden:false}'`. If Docker still isn't auto-starting, check
+  `osascript -e 'tell application "System Events" to get name of every login
+  item'` rather than trusting the JSON setting alone.
+- **The real timestamp-corruption bug was in `keywords.py`, not
+  `transcript.py`.** Two separate bugs got tangled together mid-session: (1)
+  `transcript.py` defaulting to English-only captions (real, fixed,
+  unrelated), and (2) `keywords.py`'s `_TIMESTAMP_PATTERN` only stripping
+  the *first* `[MM:SS]` timestamp in a transcript because its `^` anchor
+  wasn't `re.MULTILINE` — every later line's timestamp survived into the
+  n-gram word stream as two fake short "words" (`"08"`, `"01"`), which then
+  became bogus bigram/trigram keyword candidates. Confirmed independently
+  three times: in a real analysis's own `tags_rationale` field (Gemini
+  explicitly said the candidates were "timestamp fragments, not searchable
+  phrases"), live in the app's keyword-density view, and via a direct
+  regex test. Fixed with `re.MULTILINE`, tests added in `test_keywords.py`.
 
 ---
 
@@ -310,7 +349,7 @@ argocd/
 
 ---
 
-## 8. DeepSeek integration (new this session, uncommitted)
+## 8. DeepSeek integration (new this session)
 
 **What changed**: DeepSeek is now tried **before** Gemini on every
 text-generation call — not a fallback-of-last-resort, the primary path.
@@ -361,7 +400,7 @@ loop and `keyword_pipeline.run`).
 
 ---
 
-## 9. Transcript reliability work (new this session, uncommitted)
+## 9. Transcript reliability work (new this session)
 
 Three separate, real problems addressed:
 
@@ -408,12 +447,68 @@ transcription polling) which doesn't fit this app's fully-synchronous
 Streamlit request model at all without adding real background-job infra,
 costs real money per video, and sits in a legal gray zone against YouTube's
 ToS the same way the GCP->Minikube and Groq->Gemini deviations already
-disclosed in §11 do. The Gemini-video-watch approach (item 2 above) gets
+disclosed in §12 do. The Gemini-video-watch approach (item 2 above) gets
 most of the value with none of that cost.
 
 ---
 
-## 10. Quick health check (run this after resuming, before doing anything else)
+## 10. LetzStudy Analytics detour (this session, no code changes shipped)
+
+Explored whether real YouTube Analytics data (not just the public Data API
+stats this app already uses) could validate or improve `keyword_rank.py`.
+Two real findings, one caught-and-reversed mistake — worth recording all
+three since the mistake is as instructive as the findings.
+
+**Finding 1 — the per-video backtest idea (predict keywords, check them
+against real search-driving queries per video) is not viable on this
+channel.** YouTube privacy-buckets low-volume search queries into "Other."
+Pulled LetzStudy's lifetime search-terms export: 13,312 total search views,
+only 447 named terms covering 1,988 of them — **85.1% unattributed**. A
+single video with ~100 lifetime views returns almost nothing usable
+individually. Channel-wide aggregate analysis is fine; per-video
+attribution isn't, at this channel's current volume.
+
+**Finding 2 — real traffic-source breakdown, useful regardless of the
+backtest idea**: lifetime, Shorts feed is the largest source by raw views
+(37.6%) but contributes almost nothing by watch time (2.6%, ~12s average).
+YouTube search is 26% of views but **33.5% of total watch time** and the
+**highest CTR of any source (8.53%)** — the channel's best-converting,
+best-retaining traffic source. Directly supports keyword/SEO work being a
+good investment for this specific channel, independent of anything else in
+this section.
+
+**The mistake, corrected in-session**: initially concluded
+`keyword_rank.py`'s `INTENT_WEIGHTS` (informational: 1.0, navigational: 0.5)
+were "a real bug" because LetzStudy's real search terms are ~48% entity/
+navigational queries ("university of birmingham dubai") against only ~7%
+question-style ones, and the ranker down-weights exactly the kind that
+dominates this channel's traffic. **This didn't survive being checked
+properly.** Weighted average view duration for navigational vs
+informational search traffic came back identical (89s vs 89s, both below
+the channel's 103s overall search average) — if navigational traffic were
+being wrongly undervalued, it should retain *better*, and it doesn't. Worse,
+the whole comparison was circular: LetzStudy gets navigational search
+traffic *because* it publishes entity-titled videos, not because
+navigational intent is inherently more valuable — measuring a channel's
+past titling strategy and calling it independent evidence about intent
+value. **No change made to `keyword_rank.py`.** The actually-useful,
+non-code takeaway: entity-name titles work for this specific channel's
+niche (international university guides), which is informative for whoever
+writes titles, not a reason to touch the ranker (which serves every channel
+this app is used on, not just LetzStudy).
+
+**Tooling left behind**: `yt_analytics_pull.py` — a standalone OAuth-based
+puller for the YouTube Analytics API, unused in the end (manual CSV export
+from YouTube Studio answered the question faster and without provisioning
+new credentials for a channel that isn't the user's own Google account).
+Kept in the repo as a working, tested-syntax option if this gets revisited
+with a bigger channel where per-video attribution would actually have
+enough volume to be meaningful. `client_secret*.json` and
+`yt_analytics_token.json` are gitignored; neither exists in this repo.
+
+---
+
+## 11. Quick health check (run this after resuming, before doing anything else)
 
 ```bash
 minikube status
@@ -439,7 +534,7 @@ before spending another request just to find out.
 
 ---
 
-## 11. Known deviations from the original brief
+## 12. Known deviations from the original brief
 
 - **Host is local Minikube, not GCP** (the brief's stated target). GCP's
   India signup demanded an unclear ~₹1000 pre-payment; AWS then gated every
@@ -458,7 +553,7 @@ before spending another request just to find out.
 
 ---
 
-## 12. Memory files (auto-memory, cross-session)
+## 13. Memory files (auto-memory, cross-session)
 
 Location: `~/.claude/projects/-Users-abhishekayachit-Task3-Intern/memory/`
 
