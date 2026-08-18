@@ -17,6 +17,13 @@ Geography */
 Traffic source */
 *.csv
 
+# YouTube Analytics API OAuth credentials. client_secret*.json is the app's
+# OAuth client; yt_analytics_token.json holds a REFRESH TOKEN granting
+# ongoing read access to a real channel's private analytics. Both are live
+# credentials -- this repo and the image built from it are PUBLIC.
+client_secret*.json
+yt_analytics_token.json
+
 # Local screenshots / scratch
 Screenshot *.png
 screenshots
