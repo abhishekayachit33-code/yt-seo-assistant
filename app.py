@@ -27,6 +27,7 @@ from plan_input import is_plan_input_sufficient
 from playbook import build_playbook, build_preproduction_checklist
 from readability import scan_readability
 from revenue import estimate_revenue
+import sanitize
 from seo_diff import diff_description, diff_tags
 from shelf_life import classify
 from thumbnail import critique_thumbnail, critique_thumbnail_bytes
@@ -1369,6 +1370,22 @@ if run_plan:
                 merge_into_tags(result.get("tags", []), keyword_result.strategy)
             )
 
+        # Same outbound scrub as the analyze path. Lower risk here (the
+        # script is typed by the user, and nothing on this path is ever
+        # cache-looked-up, so there is no cross-user amplification) but the
+        # output lands in the same copy-paste blocks, so a link the model
+        # invented is worth stripping either way. The user's own script and
+        # description count as allowed source, so their real links survive.
+        plan_allowed_source = f"{meta.description}\n{plan_script_text or ''}"
+        result, plan_scrub_notes = sanitize.scrub(result, plan_allowed_source)
+        if plan_scrub_notes:
+            logger.warning("sanitize: scrubbed planning output -- %s", plan_scrub_notes)
+            st.warning(
+                "Some links in the generated output did not come from your script or "
+                "description and were removed. Review before publishing.",
+                icon=":material/gpp_maybe:",
+            )
+
         # Saved AFTER the tag merge and the audience fields are folded in, so
         # what history stores is what the report actually showed. Saving
         # earlier (as this did) persisted a pre-merge copy with different
@@ -1560,7 +1577,39 @@ if run:
             result["target_audience"] = understanding.target_audience
             result["audience_next_question"] = understanding.audience_next_question
 
-            if conn is not None:
+            # Outbound half of the trust boundary (sanitize.py). The prompt
+            # fence lowers the odds of the model being steered by a hostile
+            # comment or description; it does not eliminate them, and this
+            # output is rendered in copy-paste blocks aimed straight at a
+            # real video's public description. Links the model produced that
+            # appear nowhere in the video's own description or transcript are
+            # stripped, not merely flagged -- a user copying a code block does
+            # not re-read the warning above it.
+            #
+            # Comments are deliberately NOT part of the allowed source: there
+            # is no legitimate path from "someone commented a link" to "that
+            # link is in your description".
+            allowed_source = f"{meta.description}\n{transcript or ''}"
+            result, scrub_notes = sanitize.scrub(result, allowed_source)
+            cacheable, cache_block_reason = sanitize.is_safe_to_cache(result, allowed_source)
+
+            if scrub_notes or not cacheable:
+                logger.warning(
+                    "sanitize: injection evidence on %s -- scrubbed=%s; cacheable=%s (%s)",
+                    video_id, scrub_notes, cacheable, cache_block_reason,
+                )
+                st.warning(
+                    "This video's comments or description contained text that tried to steer "
+                    "the generated output. "
+                    + ("Suspicious links were removed. " if scrub_notes else "")
+                    + "Review the description and tags before publishing them.",
+                    icon=":material/gpp_maybe:",
+                )
+
+            # A poisoned result must not reach the shared cache: it is keyed
+            # on the video, not the user (db.get_cached_analysis), so one bad
+            # write would be replayed to every future user of this video.
+            if conn is not None and cacheable:
                 try:
                     save_analysis(conn, user_name, video_id, meta.title, meta.channel_title, result, fingerprint)
                 except Exception:

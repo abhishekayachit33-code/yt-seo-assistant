@@ -27,3 +27,8 @@ yt_analytics_token.json
 # Local screenshots / scratch
 Screenshot *.png
 screenshots
+
+# Generated audit/report artifacts. Not source, and the break-test report
+# spells out exploitable detail against a deployed app in a PUBLIC repo.
+SEO-System-Break-Test.pdf
+*-Break-Test.pdf
