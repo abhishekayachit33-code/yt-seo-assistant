@@ -19,7 +19,24 @@ agents exist and Docker Desktop is a registered login item:
 | Minikube | `~/Library/LaunchAgents/com.ytseo.minikube-autostart.plist`, single-shot, waits for Docker then runs `minikube start` (`~/Library/Scripts/ytseo-minikube-autostart.sh`) | login only, not crash |
 
 Logs: `~/Library/Logs/ytseo-{jenkins,ngrok,minikube}.log`. All three were
-verified live this session, including surviving a real reboot mid-session.
+verified to *start* correctly, including surviving a real reboot mid-session.
+
+**But starting correctly is not the same as working correctly, and this bit
+immediately.** `launchd` gives agents a minimal `PATH`
+(`/usr/bin:/bin:/usr/sbin:/sbin`), which Jenkins passes down into every
+build shell. `Jenkinsfile` calls bare `python3` and `docker`, so:
+- `python3` resolved to `/usr/bin/python3` (**3.9.6**) instead of Homebrew's
+  **3.14.6**, and pip then filtered out `streamlit>=1.60` as
+  Python-incompatible — surfacing as a *very* misleading
+  `ERROR: No matching distribution found for streamlit>=1.60`, as if the
+  pin were wrong rather than the interpreter
+- `docker` wasn't on the minimal `PATH` at all
+
+Build #21 failed this way, the first real build after the agents were
+introduced. Fixed by adding an explicit `EnvironmentVariables`/`PATH` block
+to `com.ytseo.jenkins.plist` (Homebrew paths first). **If you ever add
+another `launchd` agent here, set `PATH` in the plist from the start** — the
+same trap already hit the Minikube script separately (§5).
 
 **If something's still down despite this**, check `launchctl list | grep
 ytseo` first — PIDs present means the agent thinks it's running; check the
@@ -256,12 +273,23 @@ docker compose down
   `.env`-style `KEY=value` — the Community Cloud secrets box rejects the
   latter. Same for Postgres connection strings.
 - **`launchd` agents run with a minimal `PATH`** — no `/usr/local/bin`, no
-  `/opt/homebrew/bin`. The Minikube auto-start script (§0) failed with
-  `PROVIDER_DOCKER_NOT_FOUND` the first time even though its own `docker
-  info` pre-check passed, because `minikube` internally shells out to
-  `docker` by bare name using its own `PATH`. Fixed by exporting a full
-  `PATH` at the top of the script. Same caution applies to any future
-  `launchd`-triggered script that calls out to Homebrew-installed tools.
+  `/opt/homebrew/bin`. This bit **twice** in one session, in two different
+  places, and the second one was missed precisely because the first was
+  "already fixed":
+  1. The Minikube auto-start script (§0) failed with
+     `PROVIDER_DOCKER_NOT_FOUND` even though its own `docker info` pre-check
+     passed, because `minikube` internally shells out to `docker` by bare
+     name using its own `PATH`. Fixed by exporting a full `PATH` in the
+     script.
+  2. **Jenkins builds inherit the agent's `PATH` too** — see §0. Bare
+     `python3` in the `Jenkinsfile` silently became system Python 3.9.6
+     instead of Homebrew 3.14.6, breaking dependency resolution with an
+     error that pointed at the wrong thing entirely. Fixed with an
+     `EnvironmentVariables`/`PATH` block in the plist.
+
+  Rule: **any** `launchd` agent that runs, or transitively spawns, anything
+  Homebrew-installed needs an explicit `PATH` — in the plist for services,
+  exported in the script for scripts. Don't assume one fix covers the others.
 - **Docker Desktop's own `AutoStart` flag in `settings-store.json` is not
   the same as a macOS login item.** Flipping that JSON flag while the app
   wasn't running did NOT make Docker launch at login — confirmed live after
