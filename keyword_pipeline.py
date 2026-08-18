@@ -22,19 +22,30 @@ from candidates import (
     build_pool, score_relevance, shortlist,
 )
 from keyword_rank import KeywordStrategy, build_strategy, rank_keywords
-from keywords import top_ngrams
+from keywords import _WORD_PATTERN as _KEYWORD_WORD_PATTERN, top_ngrams
 from llm import judge_keywords
 
 MAX_SEEDS = 6
 SEED_MIN_CHARS = 4
 TRANSCRIPT_EXCERPT_CHARS = 3000
 
-_WORD_PATTERN = re.compile(r"[A-Za-z][A-Za-z'&-]+")
+# Title bigrams. Shares the Unicode-aware tokenizer so a Devanagari or Tamil
+# title still produces seeds -- under the old `[A-Za-z][A-Za-z'&-]+` such a
+# title yielded no bigrams at all, which silently removed the ONLY seed
+# fallback available to a title with no capitalised entities.
+_WORD_PATTERN = _KEYWORD_WORD_PATTERN
 
 # Capitalised runs are the cheapest available proper-noun detector: "APS
 # Certificate", "German Universities". Real entity recognition would mean
 # adding spaCy and a model download to the Docker image for a gain this
 # does not justify.
+#
+# Unavoidably Latin/Greek/Cyrillic-only, and left that way knowingly: this
+# heuristic IS letter case, and Devanagari, Tamil, Arabic and CJK are unicameral
+# -- they have no capitals to detect. There is no regex that fixes this; it
+# needs real NER. The consequence is that a Hindi-titled video gets no entity
+# seeds and falls back to title bigrams (above), which is why making that
+# fallback script-aware mattered more than it looks.
 _ENTITY_PATTERN = re.compile(r"\b(?:[A-Z][a-zA-Z'&-]+|[A-Z]{2,})(?:\s+(?:[A-Z][a-zA-Z'&-]+|[A-Z]{2,}))*\b")
 
 # Words that ruin a seed even when they appear prominently. Expanding any of
@@ -53,6 +64,15 @@ _SEED_STOPLIST = {
     "viewer", "viewers", "watching", "audience", "people", "everyone",
     "step", "steps", "part", "parts", "first", "second", "third", "next",
     "important", "great", "good", "best", "better", "really", "actually",
+    # Hindi equivalents of the same two classes already listed above:
+    # narration/greeting filler ("दोस्तों", "नमस्कार") and question scaffolding
+    # ("कैसे", "क्या"). Without these, a Hindi title yields seeds like
+    # "कैसे बनाएं" ("how to make") -- precisely what _JUNK_PHRASES already
+    # blocks for English, just in the script the tokenizer only recently
+    # started being able to see.
+    "कैसे", "क्या", "क्यों", "कहाँ", "दोस्तों", "दोस्तो", "नमस्कार", "स्वागत",
+    "वीडियो", "चैनल", "सब्सक्राइब", "बनाएं", "करें", "जानें", "देखें",
+    "dosto", "doston", "namaskar", "swagat", "video", "channel", "subscribe",
 }
 
 

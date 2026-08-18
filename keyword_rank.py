@@ -20,6 +20,7 @@ import re
 from dataclasses import dataclass, field
 
 from candidates import LANE_COMPETITOR, LANE_DEMAND, LANE_SUPPLY, Candidate
+from keywords import _HINDI_STOPWORDS, _WORD_PATTERN, stem, stem_words
 
 # Weights. Tunable without touching logic and without spending an API call --
 # the entire point of keeping ranking out of the model. Sum is not required to
@@ -65,6 +66,24 @@ W_SPECIFICITY_PLANNING_NO_SCRIPT = W_SPECIFICITY + 0.10
 # while genuinely on-topic candidates in a working run scored 0.4-0.58 -- 0.20
 # sits well above the noise floor and below real signal.
 RELEVANCE_FLOOR = 0.20
+
+# A soft ramp was tried here to remove the all-or-nothing cliff and REVERTED,
+# recorded so it is not re-attempted blind. Replacing the cut with a gradient
+# between 0.08 and this floor did smooth the boundary, but it also let
+# "jinnah international airport" (relevance 0.15) through as a SECONDARY
+# keyword -- presented to the creator as something to work into the
+# description. Surfacing an off-topic keyword is a worse failure than
+# omitting a borderline one, by the same principle _JUDGE_SYSTEM_PROMPT
+# already states: a wrong keyword costs the creator more than a missing one.
+#
+# The cliff is real but is better attacked from the other side. Measured on a
+# realistic pool, the actual cause of near-boundary churn was the relevance
+# signal being too crude, not the threshold being too sharp: adding stemming
+# moved "german university admission" from 0.100 to 0.206 -- it had been
+# scoring IDENTICALLY to "jinnah international airport" at 0.100 -- and
+# collapsed "aps certificate germany"/"aps certificates germany" from
+# 0.262/0.144 onto a single 0.269. Sharpening the input moves real keywords
+# clear of the boundary; softening the threshold just admits noise.
 
 # A tag on a competitor's video is that creator's unvalidated guess, not
 # evidence. One competitor using a phrase is noise; several independently
@@ -136,7 +155,7 @@ _COVERAGE_STOPWORDS = {
     "a", "an", "the", "for", "to", "of", "in", "on", "is", "are", "and", "or",
     "with", "from", "at", "by", "it", "do", "does", "how", "what", "why",
     "should", "i", "you", "my", "your", "be", "can", "get",
-}
+} | _HINDI_STOPWORDS
 
 _GENERIC_WORDS = {
     "tips", "guide", "tutorial", "best", "top", "new", "video", "how", "what",
@@ -195,7 +214,18 @@ def autocomplete_strength(rank: int | None) -> float:
 
 
 def _content_words(phrase: str) -> list[str]:
-    return [w for w in re.findall(r"[a-z0-9']+", phrase.lower()) if w not in _COVERAGE_STOPWORDS]
+    # Shares keywords._WORD_PATTERN rather than keeping its own ASCII class:
+    # when this used `[a-z0-9']+`, a Devanagari keyword produced NO content
+    # words at all, so _phrase_overlap divided by zero words and coverage came
+    # back 0.0 -- a Hindi video was reported as not covering its own subject.
+    #
+    # Stemmed, because the only consumer is _phrase_overlap's set membership
+    # against a stemmed haystack. Both sides must be normalized the same way
+    # or nothing matches.
+    return [
+        stem(w) for w in _WORD_PATTERN.findall(phrase.lower())
+        if w not in _COVERAGE_STOPWORDS
+    ]
 
 
 def _phrase_overlap(phrase: str, text: str) -> float:
@@ -205,14 +235,21 @@ def _phrase_overlap(phrase: str, text: str) -> float:
     "the APS certificate for students going to Germany" genuinely does cover
     the keyword "aps certificate germany", but an exact match finds nothing
     and would report the video as not covering its own subject.
+
+    Stem-set membership rather than the prefix regex this used to run. The
+    old `\\b{word}` search matched any word STARTING with the keyword's word,
+    which is both too generous ("germ" counted as covering "germany") and too
+    strict in the direction that actually mattered ("university" did not match
+    "universities", because the extra characters are on the haystack's side).
+    Comparing stems fixes both directions at once.
     """
     if not text or not phrase:
         return 0.0
     words = _content_words(phrase)
     if not words:
         return 0.0
-    haystack = text.lower()
-    return sum(1 for w in words if re.search(rf"\b{re.escape(w)}", haystack)) / len(words)
+    haystack = set(stem_words(text))
+    return sum(1 for w in words if w in haystack) / len(words)
 
 
 def content_coverage(
@@ -495,15 +532,41 @@ def head_term_phrases(strategy: KeywordStrategy) -> list[str]:
 
 
 def merge_into_tags(existing_tags: list[str], strategy: KeywordStrategy) -> list[str]:
-    """Appends any head-term keyword not already covered by an existing tag,
-    case-insensitively. Order preserved, existing tags always come first, so
-    a caller enforcing a character budget (llm.enforce_tag_char_limit) drops
-    from the newly-added end first rather than displacing what Gemini itself
-    already generated.
+    """Head-term keywords FIRST, then the model's own tags, deduplicated
+    case-insensitively.
+
+    This ordering is the entire point, and it is a deliberate reversal of what
+    this function used to do. It previously appended head terms at the end so
+    that a caller enforcing the character budget (llm.enforce_tag_char_limit)
+    "drops from the newly-added end first rather than displacing what Gemini
+    itself already generated". That reasoning sounds conservative and is
+    actually self-defeating: measured on a realistic run, Gemini's 35 tags
+    come to ~1080 characters against YouTube's 500-character cap, so the
+    greedy trim keeps roughly the first 15 of them and discards EVERY appended
+    keyword -- 0 of 5 survived. The whole keyword pipeline (autocomplete
+    sweep, competitor lane, the judge call, the ranking) contributed nothing
+    at all to the field the creator actually copies.
+
+    Head terms go first because they are the only tags in the list with
+    evidence behind them -- real search suggestions and competitor consensus
+    -- while the rest are the model's unverified generation. SYSTEM_PROMPT
+    already tells the model that real demand data "overrides generic instinct
+    about what sounds catchy"; this makes the tag list obey the same rule
+    instead of quietly inverting it.
+
+    Promotion is by POSITION only, never by spelling: when a head term already
+    exists as a tag, the existing tag's own capitalisation is the one kept and
+    simply moved to the front. Head-term phrases are normalized to lowercase
+    all through the pipeline (candidates._normalize), so overwriting with them
+    would silently downcase "APS Certificate Germany" to "aps certificate
+    germany" as a side effect of a budget fix.
     """
-    existing_lower = {t.lower() for t in existing_tags}
-    additions = [t for t in head_term_phrases(strategy) if t.lower() not in existing_lower]
-    return existing_tags + additions
+    head_terms = head_term_phrases(strategy)
+    existing_by_lower = {t.lower(): t for t in existing_tags}
+    promoted = [existing_by_lower.get(t.lower(), t) for t in head_terms]
+    head_lower = {t.lower() for t in head_terms}
+    kept = [t for t in existing_tags if t.lower() not in head_lower]
+    return promoted + kept
 
 
 def format_keyword_evidence(strategy: KeywordStrategy) -> str:

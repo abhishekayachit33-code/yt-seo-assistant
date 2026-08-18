@@ -327,11 +327,37 @@ def test_merge_into_tags_is_case_insensitive_deduplication():
     assert "aps certificate germany" not in merged  # not added again in a different case
 
 
-def test_merge_into_tags_preserves_existing_tag_order_first():
+def test_merge_into_tags_puts_evidence_backed_keywords_first():
+    """Deliberate reversal of the old "existing tags first" rule. Those tags
+    routinely exceed YouTube's 500-character cap on their own, so appending
+    head terms at the end meant llm.enforce_tag_char_limit trimmed away every
+    single evidence-backed keyword -- see merge_into_tags' docstring."""
     pool = [_candidate("aps certificate germany", rank=0)]
     strategy = build_strategy(rank_keywords(pool, "", ""), [LANE_DEMAND])
     merged = merge_into_tags(["a", "b", "c"], strategy)
-    assert merged[:3] == ["a", "b", "c"]
+    assert merged[0] == "aps certificate germany"
+    assert merged[1:] == ["a", "b", "c"]
+
+
+def test_merge_into_tags_survives_the_character_limit():
+    """The regression that matters, end to end: a full-size generated tag list
+    plus head terms, trimmed to YouTube's real cap, must still contain the
+    keywords the pipeline actually found."""
+    from llm import enforce_tag_char_limit
+
+    pool = [_candidate("aps certificate germany", rank=0)]
+    strategy = build_strategy(rank_keywords(pool, "", ""), [LANE_DEMAND])
+    bulky = [f"generic filler tag number {i}" for i in range(35)]
+    final = enforce_tag_char_limit(merge_into_tags(bulky, strategy))
+    assert "aps certificate germany" in final
+
+
+def test_merge_into_tags_promotes_position_but_keeps_existing_capitalisation():
+    pool = [_candidate("aps certificate germany", rank=0)]
+    strategy = build_strategy(rank_keywords(pool, "", ""), [LANE_DEMAND])
+    merged = merge_into_tags(["APS Certificate Germany", "other"], strategy)
+    assert merged[0] == "APS Certificate Germany"
+    assert "aps certificate germany" not in merged
 
 
 def test_merge_into_tags_is_a_noop_with_no_strategy_primary():
