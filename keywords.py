@@ -15,7 +15,13 @@ _STOPWORDS = {
     "there", "here", "what", "when", "where", "how", "all", "some", "into",
 }
 
-_TIMESTAMP_PATTERN = re.compile(r"^\[\d{2}:\d{2}\]\s*")
+# MULTILINE so `^` matches the start of every line, not just the start of
+# the whole string -- a real transcript is many "[MM:SS] text" lines joined
+# with "\n" (see transcript.segments_to_text), and without this flag only
+# the very first timestamp gets stripped. Every later line's "[08:01]" etc.
+# was surviving into the word stream as two "words" ("08", "01"), which then
+# slid straight into the bigram/trigram window as if they were real phrases.
+_TIMESTAMP_PATTERN = re.compile(r"^\[\d{2}:\d{2}\]\s*", re.MULTILINE)
 
 
 def _clean_words(text: str) -> list[str]:
