@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api import NoTranscriptFound, YouTubeTranscriptApi
 
 
 @dataclass
@@ -13,8 +13,18 @@ class TranscriptSegment:
 def fetch_transcript_segments(video_id: str) -> list[TranscriptSegment] | None:
     """Raw timed segments, untruncated. None if no transcript is available --
     never raises, callers degrade gracefully (no chapters/hook/pacing/keywords)."""
+    api = YouTubeTranscriptApi()
     try:
-        fetched = YouTubeTranscriptApi().fetch(video_id)
+        try:
+            fetched = api.fetch(video_id)  # defaults to English, the common case
+        except NoTranscriptFound:
+            # The video has captions, just not in English -- take whatever's
+            # available instead of silently returning None on a perfectly
+            # good transcript. TranscriptList iterates manually-created
+            # languages before auto-generated ones, same priority api.fetch()
+            # itself uses, just not restricted to a language allowlist.
+            transcript = next(iter(api.list(video_id)))
+            fetched = transcript.fetch()
     except Exception:
         return None
 

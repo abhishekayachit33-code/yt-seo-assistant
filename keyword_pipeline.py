@@ -174,6 +174,7 @@ def run(
     use_llm_judge: bool = True,
     region: str = autocomplete.DEFAULT_REGION,
     planning: bool = False,
+    deepseek_api_key: str | None = None,
 ) -> PipelineResult:
     """planning=True: the video does not exist yet. Passed through to the
     ranker, which reweights and re-words coverage accordingly -- see
@@ -231,7 +232,10 @@ def run(
     # --- LLM judge: features only, never an ordering ---
     judged: dict[str, dict] = {}
     if use_llm_judge and api_keys and content_summary:
-        judged = judge_keywords(api_keys, content_summary, [c.phrase for c in finalists])
+        judged = judge_keywords(
+            api_keys, content_summary, [c.phrase for c in finalists],
+            deepseek_api_key=deepseek_api_key,
+        )
 
     if judged:
         kept = [c for c in finalists if judged.get(c.phrase, {}).get("keep", True)]
