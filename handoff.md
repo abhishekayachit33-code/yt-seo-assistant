@@ -634,6 +634,86 @@ candidates had 32 and 3,126 lifetime views and are obviously wrong.
 
 ---
 
+## 12c. Full-pipeline backtest against REAL per-video attribution (new session, `eval_pipeline_backtest.py`)
+
+Closes the gap §12b left open. That eval tested one cutoff (RELEVANCE_FLOOR)
+against a GUESSED best-matching video, because channel-wide data doesn't say
+which video a search term drove. The channel owner then manually exported
+15 per-video Studio reports (`Archive 2/` -- Content -> [video] -> Analytics
+-> Traffic source -> YouTube search -> Export), which name the real video for
+each term. No API/OAuth needed on this end; those exports were pulled by hand
+in Studio. This is the real backtest, not a proxy for one.
+
+**Setup**: 15 exports, 1 byte-identical duplicate (WES USA) -> 15 unique
+videos. 2 have zero named search terms (all views bucketed into "Other") and
+were excluded -- nothing to score them against. **13 usable videos.** Video
+IDs resolved once via `search.list` (100 quota units x15, already spent, now
+hardcoded in `VIDEOS` so re-running never spends it again) and confirmed
+against real view counts from `videos.list`.
+
+**First run -- 7 Gemini / 6 DeepSeek split, alternating by view rank.**
+Ran straight into `gemini-3.7-flash`'s free-tier daily cap: `limit: 20`
+(matches the app's own "20/day budget" comments), on top of repeated 503
+"high demand" errors expected of a model that had launched 6 days earlier.
+Every one of the 7 Gemini-group videos ran with the judge call failing, and
+4 of 7 had `understand_video()` (phase 1) fail too -- meaning
+`content_summary` was empty, meaning `keyword_pipeline.run()`'s own gate
+(`if use_llm_judge and api_keys and content_summary:`) skipped the judge
+outright, not merely failed at it. Confirmed after the fact: all 7 show
+`confidence: "low"` in the saved results. **The "Gemini" numbers from that
+run are not a Gemini result -- they're the deterministic-only fallback path
+with zero LLM input**, and reporting them as "Gemini vs DeepSeek" would have
+been exactly the kind of unlabelled confound this project's audit exists to
+catch.
+
+**Second run -- all 13 forced through DeepSeek** (`python3
+eval_pipeline_backtest.py run-deepseek`), to get one clean, uncontaminated
+read of the real pipeline (relevance, specificity, coverage, autocomplete,
+consensus, AND a working judge) against real attribution. 2 transient
+`api.deepseek.com` read-timeouts, both recovered on the built-in retry, 13/13
+scored.
+
+    ALL 13 VIDEOS
+      primary matched the real #1 search term : 6/13
+      average view-coverage of real terms found: 72%
+
+Two of the 13 "misses" have a real #1 term that reads as a coincidental
+click, not real search intent: `"صلالة 2025"` (Arabic, an Omani city, on a
+UK-universities video) and `"main yahan hoon"` (Hindi, looks like a song
+lyric, on a UK-international-students video). Counting those as fair misses
+repeats the "judge evidence by quality, not by whether it showed up" mistake
+from earlier this session -- a real search term isn't automatically
+meaningful just because it drove one view. Excluding those two:
+
+    11 VIDEOS (noise-term videos excluded)
+      primary matched the real #1 search term : 6/11
+      average view-coverage of real terms found: 82%
+
+Weakest genuine result: "Top Masters Universities in Dubai" -- real term
+"masters in dubai", app's primary "best university to study in dubai" (12%
+coverage). That's a real miss worth someone eventually looking at, not
+excluded like the two noise terms above -- it's a plausible search phrase
+the app simply didn't surface.
+
+**What this does and doesn't show, stated because every eval in this
+project has needed the same caveat and it doesn't get less necessary with a
+bigger number**: n=13 (11 after excluding noise), one channel, real
+attribution this time rather than a guess -- stronger evidence than §12b,
+still not causality, still not proof the six ranking WEIGHTS are correct
+(this tests the whole ranked output, but "correct weights" would need
+knowing the *right order* among several real terms per video, which this
+doesn't attempt), still not generalisable past one study-abroad channel.
+
+**Reproducing**: `python3 eval_pipeline_backtest.py plan` (no API calls, just
+prints the video/provider assignment) or `run` (mixed split) / `run-deepseek`
+(all-DeepSeek). `VIDEOS` and Archive-2 folder names are hardcoded; if new
+per-video exports are added, extend that list by hand -- there's no
+auto-discovery from the archive folder. Results write to
+`eval_pipeline_backtest_results*.json`, gitignored (derived from the same
+private per-video analytics as `Archive 2/`).
+
+---
+
 ## 13. Memory files (auto-memory, cross-session)
 
 Location: `~/.claude/projects/-Users-abhishekayachit-Task3-Intern/memory/`

@@ -108,3 +108,39 @@ def test_evaluate_picks_the_best_matching_video_not_the_first():
     ]
     result = evaluate([("mba dubai", 10)], videos, floor=0.0)
     assert result["trivial"][0]["video_title"] == "MBA in Dubai Complete Guide"
+
+
+# ------------------------------------------------------------ eval_pipeline_backtest
+#
+# Only the pure logic -- provider assignment, matching, planning -- not the
+# live network/LLM calls, which are exercised manually (see handoff.md).
+
+from eval_pipeline_backtest import VIDEOS, assign_providers, matches_real_term
+
+
+def test_provider_split_alternates_by_view_rank():
+    """Neither group should be stacked with disproportionately big or small
+    videos -- alternating by rank is what prevents that."""
+    assignment = assign_providers(VIDEOS)
+    ranked = sorted(VIDEOS, key=lambda v: -v[2])
+    expected = {v[0]: ("gemini" if i % 2 == 0 else "deepseek") for i, v in enumerate(ranked)}
+    assert assignment == expected
+
+
+def test_provider_split_covers_every_video_exactly_once():
+    assignment = assign_providers(VIDEOS)
+    assert set(assignment) == {v[0] for v in VIDEOS}
+    assert set(assignment.values()) <= {"gemini", "deepseek"}
+
+
+def test_matches_real_term_catches_reworded_phrases():
+    assert matches_real_term("top universities in the uk", "universities in uk")
+
+
+def test_matches_real_term_rejects_unrelated_phrases():
+    assert not matches_real_term("marine engineering career", "mba in dubai")
+
+
+def test_matches_real_term_handles_empty_input():
+    assert not matches_real_term("", "mba in dubai")
+    assert not matches_real_term("mba in dubai", "")

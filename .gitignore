@@ -33,5 +33,9 @@ screenshots
 SEO-System-Break-Test.pdf
 *-Break-Test.pdf
 
-# Eval harness cache (channel titles/descriptions pulled from the API).
+# Eval harness cache/results -- derived from a real channel's private
+# per-video analytics (Archive 2/, also gitignored), so results carry the
+# same privacy concern as the source CSVs even though they're generated.
 eval_channel_videos.json
+eval_pipeline_backtest_results.json
+eval_pipeline_backtest_results_deepseek.json
