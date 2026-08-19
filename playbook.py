@@ -10,6 +10,7 @@ action, then hard compliance failures, then framing/context notes.
 
 from dataclasses import dataclass
 
+from competitors import COMPETITOR_AGREEMENT_MIN as AGREEMENT_MIN_COMPETITORS
 from limits import HealthRule
 
 
@@ -30,17 +31,35 @@ def build_playbook(
     actions: list[Action] = []
 
     if gap is not None and gap.missing_tags:
-        top = gap.missing_tags[:4]
-        tag_list = ", ".join(f'"{t}"' for t, _ in top)
-        actions.append(
-            Action(
-                f"Add {len(top)} keyword{'s' if len(top) != 1 else ''} your competitors agree on",
-                f"{tag_list} — each used by several competing videos independently, which is "
-                "evidence about this niche's vocabulary rather than one channel's guess. "
-                f"The median competitor sits at {gap.competitor_median_views:,} views.",
-                ":material/swap_horiz:",
+        # Only phrases several competitors independently converged on may be
+        # described as consensus. The list is ranked by that count but is not
+        # filtered by it, so the tail is routinely single-competitor tags --
+        # calling those "keywords your competitors agree on" would assert
+        # exactly the evidence they lack.
+        agreed = [(t, n) for t, n in gap.missing_tags if n >= AGREEMENT_MIN_COMPETITORS][:4]
+        if agreed:
+            tag_list = ", ".join(f'"{t}"' for t, _ in agreed)
+            actions.append(
+                Action(
+                    f"Add {len(agreed)} keyword{'s' if len(agreed) != 1 else ''} your competitors agree on",
+                    f"{tag_list} — each used by {AGREEMENT_MIN_COMPETITORS}+ competing videos "
+                    "independently, which is evidence about this niche's vocabulary rather "
+                    f"than one channel's guess. The median competitor sits at "
+                    f"{gap.competitor_median_views:,} views.",
+                    ":material/swap_horiz:",
+                )
             )
-        )
+        else:
+            single = gap.missing_tags[:4]
+            tag_list = ", ".join(f'"{t}"' for t, _ in single)
+            actions.append(
+                Action(
+                    f"Consider {len(single)} keyword{'s' if len(single) != 1 else ''} a competitor ranks for",
+                    f"{tag_list} — each used by only one competing video, so treat this as a "
+                    "lead to check rather than established demand.",
+                    ":material/swap_horiz:",
+                )
+            )
 
     if cta_report is not None:
         for mention in cta_report.stranded:

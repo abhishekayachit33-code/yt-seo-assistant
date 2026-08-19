@@ -35,15 +35,33 @@ def test_missing_health_rule_becomes_an_action():
     assert any("Description" in t for t in titles)
 
 
-def test_audience_gap_produces_the_highest_priority_action():
-    gap = audience_gap(1000, [], [competitor(500_000, ["streamlit deployment"])])
+def _rules():
     _, rules = compute_health_score(
         "short", "x" * 300 + " https://instagram.com/me", ["a"] * 40, [f"#{i}" for i in range(12)]
     )
-    actions = build_playbook(rules, gap=gap)
+    return rules
+
+
+def test_agreed_keywords_produce_the_highest_priority_action():
+    gap = audience_gap(1000, [], [
+        competitor(500_000, ["streamlit deployment"]),
+        competitor(400_000, ["streamlit deployment"]),
+    ])
+    actions = build_playbook(_rules(), gap=gap)
     assert actions[0].title.startswith("Add")
+    assert "agree on" in actions[0].title
     assert "streamlit deployment" in actions[0].detail
-    assert "500,000" in actions[0].detail
+
+
+def test_a_single_competitors_tag_is_not_presented_as_agreement():
+    """The list is ranked by competitor count but not filtered by it, so its
+    tail is routinely single-use tags. Calling those "keywords your
+    competitors agree on" asserts the exact evidence they lack."""
+    gap = audience_gap(1000, [], [competitor(500_000, ["streamlit deployment"])])
+    actions = build_playbook(_rules(), gap=gap)
+    assert "agree on" not in actions[0].title
+    assert "only one competing video" in actions[0].detail
+    assert "streamlit deployment" in actions[0].detail
 
 
 def test_stranded_cta_becomes_an_action():
