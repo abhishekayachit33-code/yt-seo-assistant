@@ -32,3 +32,6 @@ screenshots
 # spells out exploitable detail against a deployed app in a PUBLIC repo.
 SEO-System-Break-Test.pdf
 *-Break-Test.pdf
+
+# Eval harness cache (channel titles/descriptions pulled from the API).
+eval_channel_videos.json

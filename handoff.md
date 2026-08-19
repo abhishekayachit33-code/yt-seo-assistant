@@ -581,6 +581,59 @@ before spending another request just to find out.
 
 ---
 
+## 12b. RELEVANCE_FLOOR negative validation (new session, `eval_relevance_floor.py`)
+
+Follow-on to §10's backtest attempt. That section correctly concluded
+per-video attribution doesn't work at this channel's volume (85.1%
+unattributed). This asks a narrower question that the same 447-term export
+CAN answer: of the search terms that demonstrably drove real views, how many
+would `keyword_rank.RELEVANCE_FLOOR` (0.20) have discarded outright?
+
+**Result: the floor is fine as measured.** Against terms with >=10 real
+views, non-trivial ones (see circularity control below) keep 83% of the
+views behind them at the current floor. The sensitivity sweep shows where it
+would start actually hurting -- 0.25 keeps only 39%, 0.30 keeps 35% -- so
+0.20 has real headroom before it becomes the problem, not right at the edge
+of one.
+
+**The circularity control is the part that made this trustworthy, not
+optional.** About half the channel's real search terms are entity names
+("university of birmingham dubai"), and if the video is titled that exact
+phrase, "finding" it proves nothing about the pipeline -- it's reading the
+title back to itself. Every term is scored twice: TRIVIAL (already in the
+matched video's own title, stem-compared so plural/singular and word order
+don't hide a match) and EARNED (not). Only EARNED says anything real. This
+is the same failure mode §10 caught and reversed for `INTENT_WEIGHTS` --
+recorded here so it isn't rediscovered by someone skipping straight to a
+headline number.
+
+One concrete finding from the discarded terms worth carrying forward:
+`"uowd"` (13 views, relevance 0.142, cut) is the channel's own colloquial
+acronym for University of Wollongong Dubai. The pipeline has no cross-video
+acronym-learning, so it can't know that shorthand belongs to this channel's
+vocabulary. Not fixed this session -- flagged as a real, specific gap rather
+than the vague "acronyms are hard" the audit report said.
+
+**What this does NOT show, stated because it's the exact thing prior
+audit/eval work in this repo has warned against overclaiming:**
+causality (no A/B), generalisation past one study-abroad channel, or that the
+six ranking WEIGHTS are correct -- this only tests the one hard cutoff.
+n=11 non-trivial terms above the 10-view bar. This moved the project from
+"zero evidence the floor works" to "passes one smoke test on one channel's
+real data" -- a real upgrade, not validation, and the two should not be
+conflated when this gets cited later.
+
+**Reproducing this**: `python3 eval_relevance_floor.py fetch` (channel
+videos, ~6 quota units, cached to `eval_channel_videos.json`, gitignored)
+then `run` (report) or `sweep` (floor sensitivity table). Channel ID is
+hardcoded to LetzStudy's real upload channel
+(`UCM9BIwHTLH-91w5kXsTcbQw`) -- picked from 3 same-named channels by
+matching total view count against the export's 51,182 (51,153 on the
+channel stats, close enough given export/API timing skew). The other two
+candidates had 32 and 3,126 lifetime views and are obviously wrong.
+
+---
+
 ## 13. Memory files (auto-memory, cross-session)
 
 Location: `~/.claude/projects/-Users-abhishekayachit-Task3-Intern/memory/`
