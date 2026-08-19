@@ -40,6 +40,12 @@ class AudienceGap:
 # seeing) but excluded from the summary statistic and marked in the UI.
 OUTLIER_VIEW_MULTIPLE = 10
 
+# How many distinct competitors must use a phrase before it may be PRESENTED
+# as consensus. Deliberately the same bar as keyword_rank.COMPETITOR_CONSENSUS_MIN
+# -- one channel using a phrase is one person's guess in both places, and the
+# two surfaces disagreeing about that would be indefensible.
+COMPETITOR_AGREEMENT_MIN = 2
+
 
 def _median(values: list[int]) -> int:
     if not values:
