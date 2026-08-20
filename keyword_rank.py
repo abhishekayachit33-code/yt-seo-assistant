@@ -91,6 +91,46 @@ RELEVANCE_FLOOR = 0.20
 # distinct competitors, the signal is discarded rather than down-weighted.
 COMPETITOR_CONSENSUS_MIN = 2
 
+# ------------------------------------------------------------- floor rescue
+#
+# A narrow exemption to RELEVANCE_FLOOR, for the one case the floor gets
+# demonstrably wrong: a phrase that IS this video's subject but is worded so
+# that lexical overlap under-reads it.
+#
+# Measured case. "how to study masters in dubai" drove 28 real views to the
+# Masters video -- its single biggest search term -- and scored relevance
+# 0.166, under the 0.20 floor, so it was deleted. The extra words ("how",
+# "to", "study") dilute the cosine even though the phrase is exactly what the
+# video is about.
+#
+# The trap this has to avoid is specific and already happened once: an
+# earlier attempt simply softened the floor and let "jinnah international
+# airport" through as a secondary keyword on an unrelated video. That phrase
+# scores relevance 0.15 with autocomplete rank 0 -- statistically almost
+# identical to the real term above (0.166, rank 0). Relevance and
+# autocomplete cannot separate them.
+#
+# COVERAGE can, decisively:
+#     "how to study masters in dubai"  coverage 0.702   <- video delivers it
+#     "jinnah international airport"   coverage 0.146   <- video says nothing
+#     "cheap flights to karachi"       coverage 0.000
+# so coverage is the gate that makes this safe, and the reason a rescue needs
+# all three signals rather than the two the first draft of this rule used.
+RESCUE_MIN_RELEVANCE = 0.12        # below this is genuine noise, never rescued
+RESCUE_MAX_AUTOCOMPLETE_RANK = 2   # top 3 suggestions only -- real demand, not any mention
+RESCUE_MIN_COVERAGE = 0.45         # sits between the bug (0.146) and the real case (0.702)
+RESCUE_MAX_PER_VIDEO = 2           # a noisy autocomplete sweep must not flood the result
+
+
+def qualifies_for_rescue(candidate: Candidate, coverage: float) -> bool:
+    """Whether a below-floor candidate has enough independent corroboration
+    to survive anyway. All three conditions, never a subset."""
+    if not (RESCUE_MIN_RELEVANCE <= candidate.relevance < RELEVANCE_FLOOR):
+        return False
+    if candidate.autocomplete_rank is None or candidate.autocomplete_rank > RESCUE_MAX_AUTOCOMPLETE_RANK:
+        return False
+    return coverage >= RESCUE_MIN_COVERAGE
+
 # Autocomplete positions past this are treated as equally weak rather than
 # finely distinguished -- the difference between rank 1 and 3 is meaningful,
 # between 18 and 20 is noise.
@@ -398,8 +438,26 @@ def rank_keywords(
         w_specificity = W_SPECIFICITY
         w_autocomplete = W_AUTOCOMPLETE
 
+    # Rescue candidates are chosen in a deterministic pass BEFORE scoring, not
+    # opportunistically inside the loop: `candidates` arrives in pool order, so
+    # capping as-we-go would rescue whichever two happened to come first rather
+    # than the two best-corroborated ones.
+    rescued: set[str] = set()
+    if enforce_floor:
+        eligible = []
+        for candidate in candidates:
+            if candidate.relevance >= RELEVANCE_FLOOR:
+                continue
+            coverage = content_coverage(
+                candidate.phrase, title, description, transcript_segments, transcript_text
+            )
+            if qualifies_for_rescue(candidate, coverage):
+                eligible.append((candidate.autocomplete_rank, -coverage, candidate.phrase))
+        eligible.sort()  # best suggestion position first, then best coverage
+        rescued = {phrase for _, _, phrase in eligible[:RESCUE_MAX_PER_VIDEO]}
+
     for candidate in candidates:
-        if enforce_floor and candidate.relevance < RELEVANCE_FLOOR:
+        if enforce_floor and candidate.relevance < RELEVANCE_FLOOR and candidate.phrase not in rescued:
             continue  # dropped outright, not down-weighted -- see RELEVANCE_FLOOR
         spec = specificity(candidate.phrase)
         cov = content_coverage(
@@ -419,6 +477,15 @@ def rank_keywords(
             + W_COMPETITOR * competitor
         )
 
+        evidence = _build_evidence(candidate, cov, intent, planning, has_script)
+        if candidate.phrase in rescued:
+            # Surfaced despite scoring under this app's own relevance bar, so
+            # say so rather than presenting it as an ordinary result.
+            evidence.append(
+                "below our usual relevance bar, kept because YouTube ranks it a "
+                "top suggestion and your video covers it well"
+            )
+
         scored.append(ScoredKeyword(
             candidate=candidate,
             score=score,
@@ -427,7 +494,7 @@ def rank_keywords(
             autocomplete_strength=strength,
             intent=intent,
             intent_weight=intent_weight,
-            evidence=_build_evidence(candidate, cov, intent, planning, has_script),
+            evidence=evidence,
         ))
 
     return sorted(scored, key=lambda k: k.score, reverse=True)
