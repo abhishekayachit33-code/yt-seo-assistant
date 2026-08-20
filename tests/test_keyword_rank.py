@@ -6,7 +6,7 @@ from keyword_rank import (
     RELEVANCE_FLOOR, W_COVERAGE_PLANNING_NO_SCRIPT, _split_opening,
     assess_confidence, autocomplete_strength, build_strategy, competitor_strength,
     content_coverage, content_gaps, format_keyword_evidence, head_term_phrases,
-    merge_into_tags, rank_keywords, specificity,
+    RESCUE_MAX_PER_VIDEO, merge_into_tags, rank_keywords, specificity,
 )
 
 
@@ -539,3 +539,90 @@ def test_content_gaps_require_real_demand_not_just_absence():
 
 def test_content_gaps_empty_for_an_empty_strategy():
     assert content_gaps(build_strategy([], [])) == []
+
+
+# ------------------------------------------------------------- floor rescue
+#
+# The floor deletes a keyword whose wording under-reads on lexical overlap even
+# when it IS the video's subject. Measured: "how to study masters in dubai"
+# drove 28 real views to the Masters video and scored relevance 0.166.
+# The trap is that the off-topic bug the floor exists to block scores almost
+# identically (0.15, same autocomplete rank) -- only coverage separates them.
+
+_RESCUE_TITLE = "Top Masters Universities in Dubai"
+_RESCUE_DESC = "A guide to study masters degrees at universities in Dubai for international students."
+_RESCUE_TRANSCRIPT = (
+    "we look at how to study masters programs in dubai and the best universities "
+    "for a masters degree in dubai"
+)
+
+
+def _rescue_rank(pool):
+    return [k.phrase for k in rank_keywords(pool, _RESCUE_TITLE, _RESCUE_DESC, None, _RESCUE_TRANSCRIPT)]
+
+
+def test_below_floor_term_is_rescued_when_all_three_signals_agree():
+    pool = [_candidate("how to study masters in dubai", rank=0, relevance=0.166)]
+    assert "how to study masters in dubai" in _rescue_rank(pool)
+
+
+def test_the_off_topic_bug_is_still_blocked():
+    """The regression that matters most: this phrase has nearly the same
+    relevance and the same autocomplete rank as the rescued one. Only its
+    coverage differs, and that must be enough to keep it out."""
+    pool = [_candidate("jinnah international airport", rank=0, relevance=0.150)]
+    assert _rescue_rank(pool) == []
+
+
+def test_rescue_requires_coverage_not_just_demand():
+    """Strong autocomplete position alone must never be sufficient."""
+    pool = [_candidate("cheap flights to karachi", rank=0, relevance=0.150)]
+    assert _rescue_rank(pool) == []
+
+
+def test_rescue_requires_a_top_autocomplete_position():
+    """Same phrase, same coverage, merely-present suggestion rank -- no rescue."""
+    weak = _candidate("how to study masters in dubai", rank=7, relevance=0.166)
+    assert _rescue_rank([weak]) == []
+
+
+def test_rescue_never_reaches_genuine_noise():
+    """Below RESCUE_MIN_RELEVANCE nothing is rescued, whatever else agrees."""
+    pool = [_candidate("how to study masters in dubai", rank=0, relevance=0.05)]
+    assert _rescue_rank(pool) == []
+
+
+def test_rescue_is_capped_per_video():
+    pool = [
+        _candidate(f"how to study masters in dubai {i}", rank=0, relevance=0.166)
+        for i in range(6)
+    ]
+    assert len(_rescue_rank(pool)) <= RESCUE_MAX_PER_VIDEO
+
+
+def test_rescue_picks_the_best_corroborated_candidates_not_pool_order():
+    """The cap must select by evidence strength, not by whichever happened to
+    be built first."""
+    # All three are on-topic enough to clear the coverage gate on their own,
+    # so the ONLY thing separating them is suggestion position -- which is
+    # exactly what the cap should be selecting on.
+    pool = [
+        _candidate("study masters dubai universities", rank=2, relevance=0.166),
+        _candidate("how to study masters in dubai", rank=0, relevance=0.166),
+        _candidate("masters degrees dubai universities", rank=1, relevance=0.166),
+    ]
+    kept = _rescue_rank(pool)
+    assert "how to study masters in dubai" in kept          # rank 0, best evidence
+    assert "study masters dubai universities" not in kept   # rank 2, cut by the cap
+
+
+def test_a_rescued_keyword_discloses_why_it_survived():
+    pool = [_candidate("how to study masters in dubai", rank=0, relevance=0.166)]
+    ranked = rank_keywords(pool, _RESCUE_TITLE, _RESCUE_DESC, None, _RESCUE_TRANSCRIPT)
+    assert any("below our usual relevance bar" in e for e in ranked[0].evidence)
+
+
+def test_above_floor_keywords_are_untouched_by_the_rescue_path():
+    pool = [_candidate("masters universities dubai", rank=3, relevance=0.40)]
+    ranked = rank_keywords(pool, _RESCUE_TITLE, _RESCUE_DESC, None, _RESCUE_TRANSCRIPT)
+    assert not any("below our usual relevance bar" in e for e in ranked[0].evidence)
