@@ -1312,6 +1312,7 @@ if run_plan:
                     competitors=competitors,
                     planning=True,
                     deepseek_api_key=DEEPSEEK_API_KEY,
+                    llm_entities=understanding.entities,
                 )
             except Exception as exc:
                 logger.warning("keyword pipeline failed in planning mode: %s", exc)
@@ -1503,7 +1504,9 @@ if run:
         fingerprint = compute_fingerprint(meta.title, meta.description, meta.tags, transcript, top_comments)
         cached_result = get_cached_analysis(conn, video_id, fingerprint) if conn is not None else None
 
-        def _run_keyword_pipeline(content_summary: str) -> keyword_pipeline.PipelineResult | None:
+        def _run_keyword_pipeline(
+            content_summary: str, entities: list[str] | None = None,
+        ) -> keyword_pipeline.PipelineResult | None:
             """Shared by both the cache-hit and cache-miss paths below.
             Deliberately NOT covered by the analysis cache: search
             suggestions are time-varying, so a strategy cached alongside a
@@ -1525,6 +1528,7 @@ if run:
                     transcript_segments=transcript_segments,
                     competitors=competitors,
                     deepseek_api_key=DEEPSEEK_API_KEY,
+                    llm_entities=entities,
                 )
             except Exception as exc:
                 # Same best-effort contract as every other secondary feature:
@@ -1566,7 +1570,9 @@ if run:
             # whole point of the two-phase split. keyword_result now exists
             # in time to shape the title/description generate_seo is about
             # to do, instead of only being reconciled into tags afterward.
-            keyword_result = _run_keyword_pipeline(understanding.content_summary)
+            keyword_result = _run_keyword_pipeline(
+                understanding.content_summary, understanding.entities,
+            )
             keyword_evidence = None
             if keyword_result is not None and not keyword_result.weak_evidence:
                 keyword_evidence = format_keyword_evidence(keyword_result.strategy) or None
