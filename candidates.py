@@ -46,6 +46,11 @@ class Candidate:
     autocomplete_rank: int | None = None   # best position seen, None if never suggested
     competitor_hits: int = 0               # how many distinct competitors used it
     relevance: float = 0.0                 # cosine vs the video's own content
+    # Which seed(s) produced this phrase. Only demand-lane suggestions carry a
+    # real seed (autocomplete.Suggestion.seed); supply/competitor phrases use
+    # their own normalized text as a stand-in seed, so each remains its own
+    # group -- see score_relevance for why this exists.
+    seeds: set[str] = field(default_factory=set)
 
     @property
     def word_count(self) -> int:
@@ -99,11 +104,13 @@ def build_pool(
         candidate = _get(phrase)
         if candidate:
             candidate.lanes.add(LANE_SUPPLY)
+            candidate.seeds.add(candidate.phrase)
 
     for suggestion in suggestions or []:
         candidate = _get(suggestion.phrase)
         if candidate:
             candidate.lanes.add(LANE_DEMAND)
+            candidate.seeds.add(suggestion.seed)
             if candidate.autocomplete_rank is None or suggestion.rank < candidate.autocomplete_rank:
                 candidate.autocomplete_rank = suggestion.rank
 
@@ -111,6 +118,7 @@ def build_pool(
         candidate = _get(phrase)
         if candidate:
             candidate.lanes.add(LANE_COMPETITOR)
+            candidate.seeds.add(candidate.phrase)
             candidate.competitor_hits += 1
 
     return deduplicate(list(pool.values()))
@@ -183,6 +191,7 @@ def deduplicate(candidates: list[Candidate]) -> list[Candidate]:
 
         keeper, absorbed = _preferred(existing, candidate)
         keeper.lanes |= absorbed.lanes
+        keeper.seeds |= absorbed.seeds
         keeper.competitor_hits += absorbed.competitor_hits
         ranks = [
             r for r in (existing.autocomplete_rank, candidate.autocomplete_rank)
@@ -231,23 +240,46 @@ def score_relevance(candidates: list[Candidate], reference_text: str) -> None:
     content_summary plus title plus transcript excerpt. A candidate that
     shares no meaningful vocabulary with it scores 0 and gets cut, which is
     what stops autocomplete's wider sweeps from dragging in off-topic phrases.
+
+    IDF (how "rare", i.e. distinctive, a word is) is counted per SEED GROUP,
+    not per candidate phrase. autocomplete.collect fans one seed out into a
+    dozen-plus question/comparison variants ("why study abroad", "is study
+    abroad worth it", "best study abroad consultants" ...), all sharing one
+    word ("study") that came from one seed. Counted per phrase, that word
+    looks common purely because one seed happened to expand wide -- an
+    accident of how many query templates that seed matched, not a fact about
+    the video. Measured case: "study in malaysia for indian students" scored
+    0.179 against a 0.20 floor and was cut, even though "study in malaysia"
+    was the single largest source of real search traffic (9 of 17 views) on
+    that video -- every phrase using "study" lost to the same distortion, and
+    it was the only phrase in the whole pool capable of matching that term.
+    Grouped by seed, "study" counts as one document (the "study abroad" seed),
+    not fifteen, and stops being penalised for its seed's own fan-out.
     """
     if not reference_text.strip() or not candidates:
         return
 
     reference = _term_frequencies(reference_text)
-    documents = [_term_frequencies(c.phrase) for c in candidates] + [reference]
-    document_count = len(documents)
 
+    seed_words: dict[str, set[str]] = {}
+    for candidate in candidates:
+        words = set(stem_words(candidate.phrase))
+        for seed in candidate.seeds or {candidate.phrase}:
+            seed_words.setdefault(seed, set()).update(words)
+
+    document_count = len(seed_words) + 1  # +1 for the reference document
     appearances = Counter()
-    for document in documents:
-        appearances.update(set(document))
+    for words in seed_words.values():
+        appearances.update(words)
+    appearances.update(set(reference))
+
     idf = {
         term: math.log(document_count / (1 + count)) + 1.0
         for term, count in appearances.items()
     }
 
-    for candidate, document in zip(candidates, documents):
+    for candidate in candidates:
+        document = _term_frequencies(candidate.phrase)
         candidate.relevance = _cosine(document, reference, idf)
 
 
