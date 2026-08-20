@@ -39,3 +39,7 @@ SEO-System-Break-Test.pdf
 eval_channel_videos.json
 eval_pipeline_backtest_results.json
 eval_pipeline_backtest_results_deepseek.json
+eval_pipeline_backtest_results_supadata.json
+eval_transcripts_supadata.json
+eval_baseline_before_matcher_fix.json
+eval_pipeline_backtest_results_supadata_control.json
