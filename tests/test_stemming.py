@@ -10,7 +10,7 @@ import pytest
 
 from candidates import Candidate, build_pool, score_relevance
 from keyword_rank import _content_words, content_coverage
-from keywords import _clean_words, stem, stem_words, top_ngrams
+from keywords import _clean_words, stem, stem_words, top_ngrams, top_ngrams_by_stem
 
 
 @pytest.mark.parametrize("singular,plural", [
@@ -122,3 +122,72 @@ def test_overlap_no_longer_matches_on_bare_prefixes():
 
 def test_unrelated_keyword_still_scores_zero_coverage():
     assert content_coverage("tamil music", "german university admission", "", None, None) == 0.0
+
+
+# ------------------------------------------------------- iterative stemming
+#
+# stem() originally applied one suffix rule and stopped. "rankings" ->
+# strip "-s" -> "ranking" -> STOP, never re-checking that "ranking" itself
+# still had a strippable "-ing". Called directly, "ranking" stripped straight
+# to "rank" -- so the plural and singular of the same word landed on
+# different stems and silently failed to match. Found while building
+# top_ngrams_by_stem, not invented in the abstract.
+
+
+def test_multi_suffix_word_reaches_the_same_stem_either_form():
+    assert stem("ranking") == stem("rankings") == "rank"
+
+
+@pytest.mark.parametrize("word,expected", [
+    ("rankings", "rank"),
+    ("rankings", stem("ranking")),  # the two must agree with EACH OTHER, not just a hardcoded value
+])
+def test_rankings_matches_ranking_exactly(word, expected):
+    assert stem(word) == expected
+
+
+def test_stemming_is_bounded_not_unlimited():
+    """Guards the fix's own safety valve: chaining strips indefinitely could
+    over-strip a short, unrelated word past recognition. Two passes is the
+    documented ceiling -- this should not, for instance, strip all the way
+    down to a 1-2 letter fragment."""
+    assert len(stem("rankings")) >= 3
+
+
+# --------------------------------------------------- top_ngrams_by_stem
+
+
+def test_morphological_variants_merge_into_one_occurrence():
+    """The real bug this exists to fix: a supply-lane repeat-count gate saw
+    "masters degree" and "masters degrees" as two different phrases said
+    once each, instead of one topic said twice."""
+    text = "this masters degree program is popular. many masters degrees are offered here."
+    merged = dict(top_ngrams_by_stem(text, 2, 10))
+    assert merged.get("masters degree") == 2
+
+
+def test_top_ngrams_by_stem_word_order_still_matters():
+    """Only word FORM is normalized, not word order -- "study abroad" and
+    "abroad study" are different phrases and must not be merged."""
+    text = "study abroad is popular. abroad study takes planning."
+    merged = dict(top_ngrams_by_stem(text, 2, 10))
+    assert merged.get("study abroad") == 1
+    assert merged.get("abroad study") == 1
+
+
+def test_top_ngrams_by_stem_keeps_the_dominant_surface_form():
+    """The representative phrasing shown is whichever variant the creator
+    actually said most -- never invented wording."""
+    text = "university ranking matters. university ranking helps. university rankings vary."
+    merged = dict(top_ngrams_by_stem(text, 2, 10))
+    assert merged.get("university ranking") == 3
+    assert "university rankings" not in merged
+
+
+def test_top_ngrams_stays_literal_for_the_density_chart():
+    """top_ngrams itself (used by app.py's raw "Keyword density" chart) must
+    NOT change behaviour -- only the new function merges."""
+    text = "masters degree program. masters degrees available."
+    literal = dict(top_ngrams(text, 2, 10))
+    assert literal.get("masters degree") == 1
+    assert literal.get("masters degrees") == 1
