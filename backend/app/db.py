@@ -8,10 +8,13 @@ name to a placeholder user of the same name, so history isn't silently
 dropped on cutover; new rows are written with a real authenticated user id.
 """
 
+import logging
 import os
 
 import psycopg
 from psycopg.types.json import Jsonb
+
+logger = logging.getLogger(__name__)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -28,13 +31,21 @@ CREATE TABLE IF NOT EXISTS analyses (
     title TEXT NOT NULL,
     channel TEXT NOT NULL,
     analyzed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    result_json JSONB NOT NULL,
-    input_fingerprint TEXT NOT NULL DEFAULT ''
+    result_json JSONB NOT NULL
 );
--- CREATE TABLE IF NOT EXISTS is a no-op against the table the Streamlit app
--- already created (video_id/title/channel/user_name/...), so the new column
--- needs its own ALTER TABLE, same as user_name did when it was added there.
+
+-- Every column added after the original table shape needs its own ALTER,
+-- because CREATE TABLE IF NOT EXISTS is a NO-OP against the table the
+-- Streamlit app already created -- it does not reconcile columns. Declaring
+-- them inside the CREATE above is silently wrong on exactly the databases
+-- that matter (existing deployments), and only looks correct on a fresh one.
+--
+-- Found the hard way: input_fingerprint was declared inside the CREATE, the
+-- index below referenced it, and ensure_schema failed with UndefinedColumn
+-- against a database whose analyses table predated that column.
+ALTER TABLE analyses ADD COLUMN IF NOT EXISTS input_fingerprint TEXT NOT NULL DEFAULT '';
 ALTER TABLE analyses ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id);
+
 CREATE INDEX IF NOT EXISTS idx_analyses_user_id ON analyses(user_id);
 CREATE INDEX IF NOT EXISTS idx_analyses_video_fingerprint
     ON analyses(video_id, input_fingerprint, analyzed_at DESC);
@@ -56,7 +67,12 @@ def ensure_schema(conn: psycopg.Connection) -> bool:
         conn.execute(_SCHEMA)
         conn.commit()
         return True
-    except psycopg.Error:
+    except psycopg.Error as exc:
+        # Logged, not just signalled. Returning a bare False surfaces to the
+        # caller as "Database schema check failed" with no cause, which is
+        # indistinguishable between a dropped connection and a genuinely
+        # broken migration -- and the latter needs the column name to fix.
+        logger.warning("ensure_schema failed: %s", exc)
         try:
             conn.rollback()
         except psycopg.Error:

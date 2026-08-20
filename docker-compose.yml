@@ -1,4 +1,56 @@
 services:
+  # The React/Next.js frontend. Talks to `api` from the BROWSER, so its API
+  # URL is a localhost address on the host, not the compose service name --
+  # the fetches run in the user's browser, which has no DNS for `api`.
+  web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    environment:
+      # Server-side calls (NextAuth's credentials provider hitting
+      # /auth/login) DO run inside the compose network, so this one uses the
+      # service name.
+      API_URL: http://api:8000
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+      AUTH_SECRET: "${AUTH_SECRET:?set AUTH_SECRET in .env -- generate with npx auth secret}"
+      # Required once NODE_ENV=production: Auth.js otherwise refuses the
+      # request with UntrustedHost, because it cannot verify the Host header
+      # is one it should build callback URLs from. Verified: without this the
+      # page still renders and the auth gate still redirects, but
+      # /api/auth/session 500s, so client-side session reads break.
+      #
+      # Safe here because this container is only ever reached through a known
+      # front door. If it is ever exposed directly to arbitrary Host headers,
+      # set AUTH_URL to the canonical origin instead of trusting the header.
+      AUTH_TRUST_HOST: "true"
+    depends_on:
+      - api
+
+  # FastAPI. Built from the repo root because it imports the pipeline
+  # modules that live there -- see backend/Dockerfile.
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://ytseo:ytseo@db:5432/ytseo
+      CORS_ORIGINS: http://localhost:3000
+      JWT_SECRET: "${JWT_SECRET:?set JWT_SECRET in .env -- generate with python -c 'import secrets; print(secrets.token_hex(32))'}"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # The original Streamlit UI, kept running alongside the migration so the
+  # two can be compared against the same database. Removed once the React
+  # frontend is signed off -- see handoff.md.
   app:
     build: .
     ports:
