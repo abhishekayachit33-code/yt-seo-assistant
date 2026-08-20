@@ -218,3 +218,39 @@ def test_truly_empty_pool_is_not_reported_as_weak_evidence(mock_collect):
     result = run([], "", "", "", use_llm_judge=False)
     assert result.weak_evidence is False
     assert result.candidate_count == 0
+
+
+# ------------------------------------------------- llm entities drive seeds
+
+
+def test_llm_entities_take_precedence_over_the_regex():
+    """The regex loses the location on "X in Y" titles; verified model
+    entities replace it entirely rather than merging (merging would let the
+    regex's junk keep consuming the 6-seed budget)."""
+    seeds = build_seeds(
+        "", "Top MBA Universities in Dubai", None, None,
+        llm_entities=["MBA", "Dubai"],
+    )
+    assert "dubai" in seeds
+    assert "top mba universities" not in seeds
+
+
+def test_regex_still_runs_when_the_model_returns_nothing():
+    """An LLM outage must degrade the seed lane, never zero it."""
+    seeds = build_seeds("", "Top MBA Universities in Dubai", None, None, llm_entities=[])
+    assert seeds
+    assert "top mba universities" in seeds
+
+
+def test_regex_is_the_fallback_when_entities_are_none():
+    from_none = build_seeds("", "Top MBA Universities in Dubai", None, None, llm_entities=None)
+    legacy = build_seeds("", "Top MBA Universities in Dubai", None, None)
+    assert from_none == legacy
+
+
+def test_model_entities_still_pass_the_junk_stoplist():
+    """Verbatim-verified is not the same as useful -- an entity that is a
+    stoplisted word must still be dropped."""
+    seeds = build_seeds("", "Subscribe to the channel", None, None,
+                        llm_entities=["subscribe", "Dubai Marina"])
+    assert "subscribe" not in seeds
