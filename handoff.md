@@ -714,6 +714,126 @@ private per-video analytics as `Archive 2/`).
 
 ---
 
+## 12d. Measurement correction — the §12c numbers were inflated (UNCOMMITTED)
+
+**Read this before quoting any coverage figure from §12c.** Those numbers
+were produced by a matcher that over-credited. The corrected baseline is
+**74% Method A**, not 81%.
+
+### What was wrong
+
+`eval_pipeline_backtest.matches_real_term` required only that 60% of the
+*smaller* stem set was contained in the larger. Stopwords are stripped before
+comparison, so `"your malaysia"` reduces to the single stem `{malaysia}` and
+matched **any** Malaysia phrase:
+
+    "your malaysia" == "study in malaysia"       -> reported as a hit
+    "your malaysia" == "malaysia visa cost"      -> also a hit
+    "your malaysia" == "malaysia weather today"  -> also a hit
+
+Three different searches. One shared content word is a topic in common, not a
+query in common.
+
+**Fixed**: a single shared word now only counts when it is the whole of both
+phrases (`"uowd"` vs `"uowd"`); otherwise two shared content words are
+required before the 60% rule applies at all. Locked down by 10 cases in
+`tests/` covering every false positive above.
+
+### Isolating the matcher fix from everything else
+
+The old app output was re-scored under the new matcher, which separates
+"measurement changed" from "the app changed":
+
+| | Method A |
+|---|---|
+| original (inflated matcher, old output) | 81% |
+| same output, **corrected matcher** | **71%** |
+| new output, corrected matcher | **74%** |
+
+So **10 points of the original 81% was measurement error**, and the
+temperature/rescue changes below won 3 back.
+
+### Temperature pinned to 0 (`llm.py`)
+
+`judge_keywords` 0.2 -> 0 and `understand_video` 0.3 -> 0. Both are analysis,
+not creative writing; `generate_seo` keeps its own temperature. This targets
+the reproducibility blocker: identical code and inputs previously gave one
+video 24% -> 100% -> 24% across three runs, and another 98% -> 88%, i.e.
+roughly +/-10 points of noise on an 11-video eval — wider than the effects
+being measured. `understand_video` is the larger source of the two, since
+`content_summary` seeds `build_seeds()`, which drives the whole autocomplete
+sweep and candidate pool.
+
+**Unresolved, and it matters**: temperature 0 is not uniformly better, it
+just pins you to one draw. On the channel's biggest video (Top MBA
+Universities, 1754 views) the pinned draw is *worse* — the primary keyword
+went from `mba university in dubai` to `university dubai`, dropping "mba"
+entirely and losing 164 views of matched traffic (99% -> 10%). Confirmed this
+is a real output regression, not a matcher artifact: re-scoring the OLD
+output under the NEW matcher still gives 99% on that video. Method B is the
+worst hit (88% -> 59%) because that video dominates the view-weighted total.
+
+### Floor rescue rule (`keyword_rank.py`)
+
+Narrow exemption to `RELEVANCE_FLOOR` for phrases that ARE the video's subject
+but read low on lexical overlap. Measured case: `"how to study masters in
+dubai"` drove 28 real views — the Masters video's single biggest term — and
+scored relevance 0.166, under the 0.20 floor, so it was deleted.
+
+The trap, which an earlier attempt this session already fell into and had to
+revert: simply softening the floor let `"jinnah international airport"`
+through as a secondary keyword on an unrelated video. That phrase scores
+relevance 0.15 at autocomplete rank 0 — statistically almost identical to the
+real term (0.166, rank 0). **Relevance and autocomplete cannot separate
+them.** Coverage can, decisively:
+
+    "how to study masters in dubai"  coverage 0.702   <- video delivers it
+    "jinnah international airport"   coverage 0.146   <- video says nothing
+    "cheap flights to karachi"       coverage 0.000
+
+So a rescue requires **all three**: relevance in [0.12, floor), autocomplete
+rank <= 2, coverage >= 0.45 — plus a hard cap of 2 per video, selected in a
+deterministic pre-pass (pool order would otherwise decide which two won).
+Rescued keywords disclose themselves in the evidence line rather than
+appearing as ordinary results.
+
+**Verified in isolation** (unit tests): rescues the real term, blocks the
+jinnah bug, blocks a strong-demand/zero-coverage control, respects the cap,
+and selects by evidence strength rather than pool order. 437 tests pass.
+
+**But it did not fire on Masters in the live run** — that video stayed at
+12%. The rescue works on the synthetic reproduction and not on the real case
+it was built for. Diagnosing that misfire is the next open thread.
+
+### State
+
+Uncommitted: `.gitignore`, `eval_pipeline_backtest.py`, `keyword_pipeline.py`,
+`keyword_rank.py`, `keywords.py`, `llm.py`, and two test files. Also
+uncommitted from earlier in the session: the `top_ngrams_by_stem` supply-lane
+fix and the iterative-`stem()` fix (`"rankings"` and `"ranking"` previously
+produced different stems), and `MODEL` is currently `gemini-3.6-flash`
+(switched from 3.7 after 3.7 hit its free-tier cap of 20/day mid-eval).
+
+**The improvement plan's projections are void.** The 88% -> 97% figures were
+derived from the inflated matcher, and the bucket analysis behind them
+(never-generated / below-floor / in-pool-not-ranked) needs re-deriving against
+the 74% baseline. Two claims in it were already disproven on re-examination:
+most of the "supply-lane junk" is actually autocomplete output, and the
+phrases involved all clear the shortlist — so the failure is in final
+ranking, not candidate filtering.
+
+**Supadata** (`SUPADATA_API_KEY`) is a temporary stand-in for transcripts
+after `youtube_transcript_api` began returning `IpBlocked` — confirmed
+blanket, not per-video, via an unrelated control video. Used with
+`mode=native` **only**, never `auto`/`generate`, which fall back to paid AI
+transcription at 2 credits per minute of video versus 1 flat. Transcripts
+cache to `eval_transcripts_supadata.json` so re-runs don't re-spend credits;
+a bug where an empty cache dict was replaced by a throwaway (`cache or {}` —
+empty dict is falsy) meant only the last video persisted and cost ~12 credits
+to refill. Fixed with an identity check.
+
+---
+
 ## 13. Memory files (auto-memory, cross-session)
 
 Location: `~/.claude/projects/-Users-abhishekayachit-Task3-Intern/memory/`
