@@ -139,6 +139,34 @@ _ES_AFTER = ("x", "z", "ch", "sh", "s")
 _NO_STEM = {"news", "gas", "bus", "plus", "this", "always", "less", "class"}
 
 
+# How many suffix strips get chained. Real words need at most 2: "rankings"
+# -> strip "-s" -> "ranking" -> strip "-ing" -> "rank". A single pass gets
+# this wrong in a way that matters here -- "ranking" (called directly) strips
+# straight to "rank", but "rankings" stripped only once stops at "ranking",
+# so the plural and singular of the SAME word landed on different stems and
+# silently failed to match each other. Found via a real failure: the n-gram
+# merge this function backs (top_ngrams_by_stem) was tested against
+# "university ranking" / "university rankings" and the two did not merge.
+# Bounded at 2 rather than looped to convergence so a short word can't be
+# stripped past what _MIN_STEM_CHARS should allow, pass by pass.
+_MAX_STEM_PASSES = 2
+
+
+def _stem_once(word: str) -> str | None:
+    """One suffix rule, or None if none applied (either no suffix matched, or
+    the match did but the result was too short to trust)."""
+    if word.endswith("ss"):
+        return None  # process, address -- the -s rules must not touch these
+    if word.endswith("es") and word[:-2].endswith(_ES_AFTER):
+        stemmed = word[:-2]
+        return stemmed if len(stemmed) >= _MIN_STEM_CHARS else None
+    for suffix, replacement in _SUFFIX_RULES:
+        if word.endswith(suffix):
+            stemmed = word[: -len(suffix)] + replacement
+            return stemmed if len(stemmed) >= _MIN_STEM_CHARS else None
+    return None
+
+
 def stem(word: str) -> str:
     """Crude English suffix normalizer, NOT a linguistic stemmer.
 
@@ -159,18 +187,13 @@ def stem(word: str) -> str:
     """
     if word in _NO_STEM or not word.isascii() or not word.isalpha():
         return word
-    if word.endswith("ss"):
-        return word  # process, address -- the -s rules must not touch these
-    if word.endswith("es") and word[:-2].endswith(_ES_AFTER):
-        stemmed = word[:-2]
-        return stemmed if len(stemmed) >= _MIN_STEM_CHARS else word
-    for suffix, replacement in _SUFFIX_RULES:
-        if word.endswith(suffix):
-            stemmed = word[: -len(suffix)] + replacement
-            if len(stemmed) >= _MIN_STEM_CHARS:
-                return stemmed
-            return word  # too short to be a real stem -- keep the original
-    return word
+    current = word
+    for _ in range(_MAX_STEM_PASSES):
+        stemmed = _stem_once(current)
+        if stemmed is None:
+            break
+        current = stemmed
+    return current
 
 
 def stem_words(text: str) -> list[str]:
@@ -187,12 +210,56 @@ def stem_words(text: str) -> list[str]:
 
 def top_ngrams(text: str, n: int, top_k: int = 15) -> list[tuple[str, int]]:
     """Top n-word phrases by frequency, stripped of timestamps and stopwords.
-    n=1 is single keywords, n=2/3 are the more useful SEO-relevant phrases."""
+    n=1 is single keywords, n=2/3 are the more useful SEO-relevant phrases.
+
+    Counts EXACT surface strings on purpose -- app.py's "Keyword density"
+    chart shows this straight to the user, and a raw frequency display should
+    stay literal, not silently merge different phrasings into one bar the
+    creator never actually said. For a REPEATED-topic gate instead of a raw
+    count, see top_ngrams_by_stem below."""
     words = _clean_words(text)
     if len(words) < n:
         return []
     phrases = [" ".join(words[i:i + n]) for i in range(len(words) - n + 1)]
     return Counter(phrases).most_common(top_k)
+
+
+def top_ngrams_by_stem(text: str, n: int, top_k: int = 15) -> list[tuple[str, int]]:
+    """Like top_ngrams, but rephrasings of the same words count as the SAME
+    occurrence rather than as separate one-off phrases.
+
+    Built for keyword_pipeline's supply lane, which gates on "was this phrase
+    said more than once" -- real speech almost never repeats a phrase
+    byte-for-byte. "pursuing your masters", "a master's degree" and "doing
+    your masters" are one topic said three ways; top_ngrams' exact-string
+    counting sees three different phrases said once each and the topic never
+    clears the gate at all. Grouping by stem fixes that without needing the
+    creator to repeat themselves verbatim.
+
+    Grouped by the STEMMED, ORDER-PRESERVING word sequence -- word order still
+    matters ("study abroad" and "abroad study" are not merged), only each
+    word's exact form is normalized. The phrase shown is whichever exact
+    wording was the group's own most common variant, so a dominant phrasing
+    still wins over a rare fringe one; nothing is ever re-worded to something
+    the creator didn't actually say.
+    """
+    words = _clean_words(text)
+    if len(words) < n:
+        return []
+    phrases = [" ".join(words[i:i + n]) for i in range(len(words) - n + 1)]
+    surface_counts = Counter(phrases)
+
+    groups: dict[tuple[str, ...], Counter] = {}
+    for phrase, count in surface_counts.items():
+        signature = tuple(stem(w) for w in phrase.split())
+        groups.setdefault(signature, Counter())[phrase] = count
+
+    merged = []
+    for variants in groups.values():
+        representative, _ = variants.most_common(1)[0]
+        merged.append((representative, sum(variants.values())))
+
+    return sorted(merged, key=lambda item: -item[1])[:top_k]
 
 
 DEFAULT_WORDS_PER_MINUTE = 140
