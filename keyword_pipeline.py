@@ -22,7 +22,7 @@ from candidates import (
     build_pool, score_relevance, shortlist,
 )
 from keyword_rank import KeywordStrategy, build_strategy, rank_keywords
-from keywords import _WORD_PATTERN as _KEYWORD_WORD_PATTERN, top_ngrams
+from keywords import _WORD_PATTERN as _KEYWORD_WORD_PATTERN, top_ngrams, top_ngrams_by_stem
 from llm import judge_keywords
 
 MAX_SEEDS = 6
@@ -120,6 +120,7 @@ def build_seeds(
     existing_tags: list[str] | None = None,
     transcript: str | None = None,
     max_seeds: int = MAX_SEEDS,
+    llm_entities: list[str] | None = None,
 ) -> list[str]:
     """Seeds drive every downstream query, so they come from the richest
     description of the video available rather than the title alone.
@@ -137,11 +138,26 @@ def build_seeds(
             seen.add(phrase)
             seeds.append(phrase)
 
-    # Named entities first, from title and summary. These are the highest-
-    # value seeds by a wide margin -- they are the specific things the video
-    # is about, and they are what a viewer would actually type.
-    for entity in _entity_phrases(title) + _entity_phrases(content_summary):
-        add(entity)
+    # Named entities first. These are the highest-value seeds by a wide
+    # margin -- the specific things the video is about, and what a viewer
+    # actually types.
+    #
+    # Model-extracted entities (llm.understand_video, already verbatim-checked
+    # against the video's own text) take precedence over the capitalised-run
+    # regex, which is kept only as the fallback for when that call failed or
+    # returned nothing. Measured on this channel's 13 real titles, the regex
+    # lost the location on 5 of them -- "Top MBA Universities in Dubai" yielded
+    # "top mba universities" with no Dubai at all, because the lowercase "in"
+    # ends the capitalised run and a lone "Dubai" is then discarded as probable
+    # sentence-capitalisation. That is fine for prose and wrong for titles,
+    # where nearly every word is capitalised. Three of the four worst-covered
+    # videos were losing their location this way; the model missed none.
+    if llm_entities:
+        for entity in llm_entities:
+            add(entity)
+    else:
+        for entity in _entity_phrases(title) + _entity_phrases(content_summary):
+            add(entity)
 
     # The creator's own tags: already human-curated search phrases.
     for tag in (existing_tags or [])[:4]:
@@ -195,13 +211,15 @@ def run(
     region: str = autocomplete.DEFAULT_REGION,
     planning: bool = False,
     deepseek_api_key: str | None = None,
+    llm_entities: list[str] | None = None,
 ) -> PipelineResult:
     """planning=True: the video does not exist yet. Passed through to the
     ranker, which reweights and re-words coverage accordingly -- see
     keyword_rank.rank_keywords."""
     lanes_used: list[str] = []
 
-    seeds = build_seeds(content_summary, title, existing_tags, transcript)
+    seeds = build_seeds(content_summary, title, existing_tags, transcript,
+                        llm_entities=llm_entities)
 
     # --- demand lane (free, unofficial, may return nothing) ---
     suggestions = autocomplete.collect(seeds, region=region) if seeds else []
@@ -216,11 +234,18 @@ def run(
         # repeats any specific 2-3 word phrase twice, so that bar would zero
         # out the lane on real input. Below ~500 words, one occurrence is
         # legitimate supply evidence.
+        # top_ngrams_by_stem, not top_ngrams: this is a "did the video return
+        # to this topic" gate, and real speech rarely repeats a phrase
+        # byte-for-byte -- "pursuing your masters" and "a master's degree"
+        # are one topic said two ways, and exact-string counting would see
+        # two different phrases said once each and never clear min_count.
+        # See top_ngrams_by_stem's docstring for how that was found (two real
+        # videos stuck on lanes_used=['demand'] only, supply never firing).
         word_count = len(re.findall(r"\S+", transcript))
         min_count = 1 if word_count < 500 else 2
         for n in (3, 2):
             supply_phrases.extend(
-                phrase for phrase, count in top_ngrams(transcript, n, 25) if count >= min_count
+                phrase for phrase, count in top_ngrams_by_stem(transcript, n, 25) if count >= min_count
             )
         if supply_phrases:
             lanes_used.append(LANE_SUPPLY)
