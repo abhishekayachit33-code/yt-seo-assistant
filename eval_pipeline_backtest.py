@@ -55,17 +55,33 @@ import json
 import os
 import sys
 
+import requests
 from dotenv import load_dotenv
 
 import keyword_pipeline
 from eval_relevance_floor import appears_in_title, load_search_terms
 from keywords import stem_words
 from llm import understand_video
-from transcript import fetch_transcript_segments, segments_to_text
+from transcript import TranscriptSegment, fetch_transcript_segments, segments_to_text
 from youtube import fetch_metadata
 
 RESULTS_CACHE = "eval_pipeline_backtest_results.json"
 RESULTS_DEEPSEEK_CACHE = "eval_pipeline_backtest_results_deepseek.json"
+RESULTS_SUPADATA_CACHE = "eval_pipeline_backtest_results_supadata.json"
+
+# Transcripts fetched via Supadata, cached to disk. Cached deliberately: every
+# fetch costs a credit, and a re-run of the eval must not silently re-spend
+# them just because the harness was invoked twice.
+TRANSCRIPT_CACHE = "eval_transcripts_supadata.json"
+
+_SUPADATA_URL = "https://api.supadata.ai/v1/youtube/transcript"
+
+# native ONLY, never "auto" or "generate". Those modes fall back to paid AI
+# transcription (2 credits per MINUTE of video, vs 1 credit flat for native),
+# which is a silent cost escalation on any video whose captions are missing.
+# A video without real captions must fail here and be reported, not quietly
+# transcribed at 10-50x the price.
+_SUPADATA_MODE = "native"
 
 # (video_id, Studio export folder, real total views on that export). Folder
 # names are literal directory names under "Archive 2/" -- resolved by
@@ -121,29 +137,115 @@ def print_plan() -> None:
     print(f"DeepSeek requests (typical): {len(deepseek) * 2}  (falls back to Gemini only on DeepSeek failure)")
 
 
+def _load_transcript_cache() -> dict:
+    if os.path.exists(TRANSCRIPT_CACHE):
+        with open(TRANSCRIPT_CACHE) as handle:
+            return json.load(handle)
+    return {}
+
+
+def fetch_transcript_supadata(video_id: str, api_key: str, cache: dict) -> list | None:
+    """Real official captions via Supadata, as TranscriptSegment objects.
+
+    Exists because youtube_transcript_api started returning IpBlocked partway
+    through this session -- confirmed blanket (an unrelated control video was
+    blocked too), not per-video. That is the documented fragility of an
+    unofficial endpoint, and it made the before/after comparison this eval
+    depends on impossible to run.
+
+    Returns None rather than raising, and never falls back to AI generation
+    (see _SUPADATA_MODE): a missing transcript is a reportable fact here, not
+    something to paper over with a costlier substitute whose text would not
+    be comparable to the other videos' anyway.
+    """
+    if video_id in cache:
+        payload = cache[video_id]
+    else:
+        response = requests.get(
+            _SUPADATA_URL,
+            headers={"x-api-key": api_key},
+            params={"videoId": video_id, "mode": _SUPADATA_MODE},
+            timeout=30,
+        )
+        if response.status_code != 200:
+            print(f"    supadata {response.status_code}: {response.text[:120]}")
+            return None
+        payload = response.json()
+        cache[video_id] = payload
+        with open(TRANSCRIPT_CACHE, "w") as handle:
+            json.dump(cache, handle)
+
+    content = payload.get("content")
+    if not isinstance(content, list):
+        return None
+    return [
+        TranscriptSegment(
+            start=item["offset"] / 1000,      # Supadata reports milliseconds;
+            duration=item["duration"] / 1000,  # TranscriptSegment expects seconds
+            text=item["text"],
+        )
+        for item in content
+    ]
+
+
 def _stems(phrase: str) -> set[str]:
     return set(stem_words(phrase))
 
 
 def matches_real_term(candidate_phrase: str, real_term: str) -> bool:
-    """A loose but principled match: the smaller stem set is (mostly)
-    contained in the larger one. Catches "top universities in the uk" against
-    the real term "universities in uk" without requiring exact wording --
-    the two genuinely mean the same search, just not byte-identical."""
+    """Whether an app-produced phrase represents the same search as a real
+    term. Deliberately strict, because this function IS the measurement --
+    every coverage percentage this harness reports is its output.
+
+    The earlier version required only that 60% of the smaller stem set was
+    contained in the larger. That silently inflated every number: stopwords
+    are stripped before comparison, so "your malaysia" reduces to the single
+    stem {malaysia} and matched ANY Malaysia phrase --
+
+        "your malaysia" == "study in malaysia"      (reported as a hit)
+        "your malaysia" == "malaysia visa cost"     (also a hit)
+        "your malaysia" == "malaysia weather today" (also a hit)
+
+    Those are three different searches. One shared content word is a topic in
+    common, not a query in common, so it now only counts when that word is
+    the WHOLE of both phrases ("uowd" vs "uowd"). Beyond that, two shared
+    content words are required before the 60% rule is consulted at all.
+
+    Consequence worth stating plainly: this reports LOWER coverage than the
+    previous version on identical data. The previous numbers were wrong.
+    """
     a, b = _stems(candidate_phrase), _stems(real_term)
     if not a or not b:
         return False
-    smaller, larger = (a, b) if len(a) <= len(b) else (b, a)
-    overlap = len(smaller & larger) / len(smaller)
-    return overlap >= 0.6
+
+    shared = a & b
+    if len(shared) < 2:
+        # A single common word only means the same search when neither phrase
+        # carries anything else -- "think uowd" is not the query "uowd".
+        return a == b
+    return len(shared) / min(len(a), len(b)) >= 0.6
 
 
-def evaluate_video(video_id: str, folder: str, provider: str, api_keys: list[str], deepseek_key: str | None) -> dict:
+def evaluate_video(
+    video_id: str, folder: str, provider: str, api_keys: list[str],
+    deepseek_key: str | None, transcript_cache: dict | None = None,
+    supadata_key: str | None = None, use_llm_entities: bool = True,
+) -> dict:
     real_terms = load_search_terms(os.path.join(ARCHIVE_DIR, folder, "Table data.csv"))
     total_real_views = sum(v for _, v in real_terms)
 
     meta = fetch_metadata(video_id, os.getenv("YOUTUBE_API_KEY"))
-    segments = fetch_transcript_segments(video_id)
+    if supadata_key is not None:
+        # `transcript_cache or {}` would be a bug here: an EMPTY dict is
+        # falsy, so the first call would substitute a fresh throwaway dict,
+        # every video would write only its own entry, and the on-disk cache
+        # would end up holding just the last one -- re-spending a credit per
+        # video on every subsequent run. Identity check, not truthiness.
+        if transcript_cache is None:
+            transcript_cache = {}
+        segments = fetch_transcript_supadata(video_id, supadata_key, transcript_cache)
+    else:
+        segments = fetch_transcript_segments(video_id)
     transcript_text = segments_to_text(segments) if segments else None
 
     use_key = deepseek_key if provider == "deepseek" else None
@@ -157,6 +259,12 @@ def evaluate_video(video_id: str, folder: str, provider: str, api_keys: list[str
         title=meta.title, description=meta.description, existing_tags=meta.tags,
         transcript=transcript_text, transcript_segments=segments,
         competitors=None, deepseek_api_key=use_key,
+        # None forces the capitalised-run regex, which is the control arm.
+        # Both arms run minutes apart in one session on purpose: autocomplete
+        # is a live endpoint that drifted enough earlier today to move a video
+        # from 99% to 10% with no code change at all, so a baseline measured
+        # hours ago cannot be compared against.
+        llm_entities=understanding.entities if use_llm_entities else None,
     )
     strategy = pipeline_result.strategy
     app_phrases = [k.phrase for k in strategy.all_keywords]
@@ -197,8 +305,23 @@ def run() -> None:
     if not api_keys:
         raise SystemExit("GEMINI_API_KEY is not set.")
 
-    force_provider = "deepseek" if len(sys.argv) > 1 and sys.argv[1] == "run-deepseek" else None
-    cache_path = RESULTS_DEEPSEEK_CACHE if force_provider else RESULTS_CACHE
+    command = sys.argv[1] if len(sys.argv) > 1 else "run"
+    use_supadata = command.startswith("run-supadata")
+    supadata_key = os.getenv("SUPADATA_API_KEY") if use_supadata else None
+    if use_supadata and not supadata_key:
+        raise SystemExit("SUPADATA_API_KEY is not set.")
+    transcript_cache = _load_transcript_cache() if use_supadata else None
+
+    # "-control" suffix runs the identical eval with the regex entity
+    # extractor, for a same-session A/B against autocomplete drift.
+    use_llm_entities = not command.endswith("-control")
+    force_provider = "deepseek" if command.startswith(("run-deepseek", "run-supadata")) else None
+    cache_path = (
+        (RESULTS_SUPADATA_CACHE.replace(".json", "_control.json") if not use_llm_entities
+         else RESULTS_SUPADATA_CACHE) if use_supadata
+        else RESULTS_DEEPSEEK_CACHE if force_provider
+        else RESULTS_CACHE
+    )
     assignment = (
         {video_id: force_provider for video_id, _, _ in VIDEOS}
         if force_provider else assign_providers(VIDEOS)
@@ -209,7 +332,11 @@ def run() -> None:
         provider = assignment[video_id]
         print(f"  {provider:>8}  {video_id}  ({views} views)  ...", end=" ", flush=True)
         try:
-            result = evaluate_video(video_id, folder, provider, api_keys, deepseek_key)
+            result = evaluate_video(
+                video_id, folder, provider, api_keys, deepseek_key,
+                transcript_cache=transcript_cache, supadata_key=supadata_key,
+                use_llm_entities=use_llm_entities,
+            )
             print(f"primary={result['app_primary']!r}  coverage={result['coverage']:.0%}")
             results.append(result)
         except Exception as exc:
@@ -252,7 +379,7 @@ if __name__ == "__main__":
     command = sys.argv[1] if len(sys.argv) > 1 else "plan"
     if command == "plan":
         print_plan()
-    elif command in ("run", "run-deepseek"):
+    elif command.startswith(("run", "run-deepseek", "run-supadata")):
         run()
     else:
         raise SystemExit(__doc__)
