@@ -1,7 +1,7 @@
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from google.genai import types
 
@@ -13,7 +13,7 @@ from sanitize import fence_untrusted, new_fence_token, trust_rule
 
 logger = logging.getLogger(__name__)
 
-MODEL = "gemini-3.7-flash"
+MODEL = "gemini-3.6-flash"
 DEEPSEEK_MODEL = "deepseek-v4-flash"
 
 
@@ -60,7 +60,7 @@ def _generate_json(
 # fingerprint (cache_key.py), so a prompt/schema edit invalidates every
 # previously cached analysis automatically instead of silently serving
 # output shaped by a prompt that no longer exists.
-PROMPT_VERSION = 6
+PROMPT_VERSION = 7
 
 SYSTEM_PROMPT = """
     You are a senior, data-driven YouTube Growth Strategist. Your job is to analyze a video's existing metadata (title, description, tags), transcript, and audience comments, and prescribe highly specific, evidence-based optimizations.
@@ -343,6 +343,22 @@ the specific decision this specific viewer is currently stuck on.
 
 audience_next_question: the single question this viewer most likely types
 into YouTube search immediately AFTER watching this video.
+
+entities: the searchable named things in the TITLE -- whatever kind this
+video happens to be about: people, places, organisations, products, tools,
+games, recipes, models, techniques, qualifications, events. Do not assume a
+subject area; take the title on its own terms.
+
+A qualifier attached to the main subject by a small word ("in", "for",
+"with", "on", "vs") is itself an entity and is the one most often lost --
+a viewer types that qualifier, so extract it separately as well as any
+phrase containing it.
+
+Return each entity EXACTLY as it appears in the title, never reworded: they
+are checked against the original text and silently dropped if they do not
+match. EXCLUDE generic scaffolding that would fit any video anywhere:
+"top", "best", "guide", "complete", "ultimate", "video", "explained",
+"review", "you must see", and similar filler.
 """
 
 _UNDERSTAND_SCHEMA = {
@@ -351,9 +367,45 @@ _UNDERSTAND_SCHEMA = {
         "content_summary": {"type": "string"},
         "target_audience": {"type": "string"},
         "audience_next_question": {"type": "string"},
+        "entities": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["content_summary", "target_audience", "audience_next_question"],
+    "required": [
+        "content_summary", "target_audience", "audience_next_question", "entities",
+    ],
 }
+
+# Entities that pass the verbatim check but are worthless as search seeds:
+# the creator's own channel name is in most of their titles and nobody
+# searches a small channel by name to find its content.
+_ENTITY_DENYLIST = {"letzstudy"}
+
+
+def verified_entities(entities: list[str], source_text: str) -> list[str]:
+    """Keeps only entities that genuinely appear in the video's own text.
+
+    This is the guard that makes LLM entity extraction safe to act on. The
+    model proposes; deterministic code disposes. An entity it invented -- a
+    university the video never mentions, a city it inferred from context --
+    cannot survive a substring check against the actual title, description
+    and transcript, so the hallucination failure mode is closed outright
+    rather than mitigated.
+
+    Case-insensitive because the model normalizes capitalisation ("MBBS" for
+    a title reading "MBBs"), and that difference says nothing about whether
+    the entity is real.
+    """
+    haystack = (source_text or "").lower()
+    seen: set[str] = set()
+    kept: list[str] = []
+    for entity in entities or []:
+        cleaned = " ".join(str(entity).split()).strip()
+        lowered = cleaned.lower()
+        if not cleaned or lowered in seen or lowered in _ENTITY_DENYLIST:
+            continue
+        if lowered in haystack:
+            seen.add(lowered)
+            kept.append(cleaned)
+    return kept
 
 
 @dataclass
@@ -364,6 +416,10 @@ class VideoUnderstanding:
     content_summary: str = ""
     target_audience: str = ""
     audience_next_question: str = ""
+    # Verbatim-verified against the video's own text (see verified_entities).
+    # Empty is a normal, safe outcome -- keyword_pipeline falls back to the
+    # regex extractor rather than losing the seed lane entirely.
+    entities: list[str] = field(default_factory=list)
 
 
 def generate_transcript_from_video(api_keys: list[str], video_url: str) -> str | None:
@@ -446,7 +502,14 @@ def understand_video(
                 system_instruction=_UNDERSTAND_SYSTEM_PROMPT,
                 response_mime_type="application/json",
                 response_schema=_UNDERSTAND_SCHEMA,
-                temperature=0.3,
+                # 0 for the same reason as judge_keywords: this is analysis,
+                # not creative writing. It is also the LARGER variance source
+                # of the two -- content_summary seeds build_seeds(), which
+                # drives the autocomplete sweep and therefore the entire
+                # candidate pool, so a reworded summary changes every
+                # downstream keyword. The creative call (generate_seo) keeps
+                # its own temperature; only the analysis phases are pinned.
+                temperature=0,
             ),
             deepseek_api_key=deepseek_api_key,
         )
@@ -455,6 +518,14 @@ def understand_video(
             content_summary=(data.get("content_summary") or "").strip(),
             target_audience=(data.get("target_audience") or "").strip(),
             audience_next_question=(data.get("audience_next_question") or "").strip(),
+            entities=verified_entities(
+                data.get("entities") or [],
+                # Checked against the material the entity should have come
+                # from, not just the title: the model is told to read the
+                # title, but a legitimate entity mentioned in the description
+                # or transcript should not be rejected for that.
+                f"{title}\n{description}\n{transcript or ''}",
+            ),
         )
     except Exception as exc:
         logger.warning("understand_video: phase-1 analysis failed, continuing without it: %s", exc)
@@ -658,7 +729,15 @@ def judge_keywords(
                 system_instruction=_JUDGE_SYSTEM_PROMPT,
                 response_mime_type="application/json",
                 response_schema=_JUDGE_SCHEMA,
-                temperature=0.2,  # classification, not creativity
+                # 0, not 0.2. This is pure classification -- keep/reject plus
+                # an intent label -- so sampling variance buys nothing and
+                # costs reproducibility. Measured: on identical code and
+                # identical inputs, one video's coverage read 24%, then 100%,
+                # then 24% across three runs, and another moved 98% -> 88%.
+                # That is roughly +/-10 points of run-to-run noise on an
+                # 11-video eval, wider than the improvements being measured,
+                # and it already produced one false "the fix worked" reading.
+                temperature=0,
             ),
             deepseek_api_key=deepseek_api_key,
         )
