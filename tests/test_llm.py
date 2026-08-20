@@ -549,3 +549,50 @@ def test_grounding_checks_are_skipped_without_timing_data():
     duration; guessing one would turn a check into a fabrication of its own."""
     data = _valid_output(suggestions=["At 47:15 your pacing drops."])
     assert find_output_violations(data, True) == []
+
+
+# --------------------------------------------------- entity verbatim guard
+#
+# The model proposes entities; this check is what makes acting on them safe.
+# Measured on 13 real titles, the capitalised-run regex lost the location on
+# 5 of them ("Top MBA Universities in Dubai" -> no "Dubai") while the model
+# missed none -- but only a deterministic check can stop the model inventing
+# one.
+
+from llm import verified_entities
+
+
+def test_entity_present_in_the_source_is_kept():
+    assert verified_entities(["Dubai"], "Top MBA Universities in Dubai") == ["Dubai"]
+
+
+def test_invented_entity_is_rejected():
+    """The hallucination failure mode, closed outright rather than mitigated."""
+    assert verified_entities(["Harvard"], "Top MBA Universities in Dubai") == []
+
+
+def test_check_is_case_insensitive():
+    """The model normalises capitalisation; that says nothing about whether
+    the entity is real."""
+    assert verified_entities(["MBBS"], "mbbs in dubai fees") == ["MBBS"]
+
+
+def test_channel_name_is_denylisted():
+    """Passes the verbatim check but is worthless as a seed -- nobody finds a
+    small channel's content by searching its name."""
+    assert verified_entities(["LetzStudy"], "Study Law in Dubai | LetzStudy") == []
+
+
+def test_duplicates_collapse():
+    assert verified_entities(["Dubai", "dubai", "DUBAI"], "MBA in Dubai") == ["Dubai"]
+
+
+def test_entities_may_come_from_description_or_transcript():
+    source = "Some Title\nAbout Heriot-Watt University\ntranscript text"
+    assert verified_entities(["Heriot-Watt University"], source) == ["Heriot-Watt University"]
+
+
+def test_empty_and_malformed_input_is_safe():
+    assert verified_entities([], "anything") == []
+    assert verified_entities(["", "   "], "anything") == []
+    assert verified_entities(None, "anything") == []
